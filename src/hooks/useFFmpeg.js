@@ -4,7 +4,10 @@ import { fetchFile, toBlobURL } from '@ffmpeg/util'
 
 // Self-hosted core (copied into public/ffmpeg) so nothing is fetched from a
 // third-party CDN and processing works fully offline after first load.
-const CORE_BASE = `${window.location.origin}/ffmpeg`
+// Resolved relative to the page (not window.location.origin) so it still
+// works when the app is served from a subpath, e.g. GitHub Pages project
+// sites at username.github.io/repo-name/.
+const CORE_BASE = `${import.meta.env.BASE_URL}ffmpeg`
 
 function extensionOf(filename) {
   const dot = filename.lastIndexOf('.')
