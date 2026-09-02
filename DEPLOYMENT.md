@@ -18,25 +18,26 @@ how fast an export actually runs; it only affects:
 
 ## GitHub Pages
 
-Works for this app (it's a pure static site, no backend needed), with two
-code changes required first — see below. Its one structural limitation:
-**GitHub Pages cannot set custom response headers**, so COOP/COEP is not
-available there. That permanently caps a GitHub Pages deployment at the
-single-threaded ffmpeg core — fine for correctness, not the fastest
-possible option.
+Works for this app (it's a pure static site, no backend needed). Its one
+structural limitation: **GitHub Pages cannot set custom response
+headers**, so COOP/COEP is not available there. That permanently caps a
+GitHub Pages deployment at the single-threaded ffmpeg core — fine for
+correctness, not the fastest possible option.
 
-Required fixes before it'll work at all on a GitHub Pages *project* page
-(`username.github.io/repo-name/`, not a root user/org page):
+This repo is set up to deploy to GitHub Pages as a project page
+(`master-max.github.io/linearEditComplete/`):
 
-- `src/hooks/useFFmpeg.js` builds `CORE_BASE` from `window.location.origin`,
-  which doesn't include the `/repo-name/` subpath. Needs to resolve
-  relative to the page instead (e.g. `import.meta.env.BASE_URL`).
-- `vite.config.js` needs `base: '/repo-name/'` (or `base: './'` for a
-  repo-name-agnostic relative build) — Vite otherwise emits absolute
-  root-relative asset paths that 404 under a subpath.
-- Pages doesn't run a build step for a Vite app on its own; needs a GitHub
-  Actions workflow (`npm run build` → deploy `dist/`) or a manually
-  published `dist/` on the `gh-pages` branch.
+- `vite.config.js` sets `base: '/linearEditComplete/'` so Vite emits
+  asset paths that resolve correctly under the subpath.
+- `src/hooks/useFFmpeg.js` resolves `CORE_BASE` from
+  `import.meta.env.BASE_URL` instead of `window.location.origin`, so the
+  self-hosted ffmpeg core is fetched from the same subpath.
+- `.github/workflows/deploy.yml` builds the app (`npm run build`) and
+  publishes `dist/` via `actions/deploy-pages` on every push to `main`.
+
+To turn it on: in the repo's Settings → Pages, set **Source** to "GitHub
+Actions". The workflow runs on the next push to `main` and publishes the
+site at `https://master-max.github.io/linearEditComplete/`.
 
 `ffmpeg-core.wasm` (~32MB) is well under GitHub's 50MB warning / 100MB hard
 limit, so it commits fine without Git LFS.
