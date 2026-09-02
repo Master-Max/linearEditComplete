@@ -1,27 +1,13 @@
 import { useRef } from 'react'
-
-let nextSourceId = 1
+import { loadVideoSource } from '../lib/loadVideoSource'
 
 export default function VideoUpload({ onAdd }) {
   const inputRef = useRef(null)
 
-  function handleFiles(fileList) {
+  async function handleFiles(fileList) {
     const files = Array.from(fileList).filter((f) => f.type.startsWith('video/'))
-    for (const file of files) {
-      const url = URL.createObjectURL(file)
-      const video = document.createElement('video')
-      video.preload = 'metadata'
-      video.src = url
-      video.onloadedmetadata = () => {
-        onAdd({
-          id: nextSourceId++,
-          file,
-          url,
-          name: file.name,
-          duration: video.duration,
-        })
-      }
-    }
+    const sources = await Promise.all(files.map(loadVideoSource))
+    sources.forEach(onAdd)
   }
 
   return (

@@ -1,11 +1,10 @@
-import { useRef, useState } from 'react'
+import { useRef } from 'react'
 import { formatTime } from '../lib/format'
+import { usePlayerMarks } from '../hooks/usePlayerMarks'
 
 export default function SourceMonitor({ source, onAddClip }) {
   const videoRef = useRef(null)
-  const [inPoint, setInPoint] = useState(0)
-  const [outPoint, setOutPoint] = useState(source?.duration ?? 0)
-  const [currentTime, setCurrentTime] = useState(0)
+  const marks = usePlayerMarks(videoRef, source)
 
   if (!source) {
     return (
@@ -15,26 +14,16 @@ export default function SourceMonitor({ source, onAddClip }) {
     )
   }
 
-  function markIn() {
-    const t = videoRef.current?.currentTime ?? 0
-    setInPoint(Math.min(t, outPoint))
-  }
-
-  function markOut() {
-    const t = videoRef.current?.currentTime ?? 0
-    setOutPoint(Math.max(t, inPoint))
-  }
-
   function handleAdd() {
-    if (outPoint <= inPoint) return
+    if (marks.outPoint <= marks.inPoint) return
     onAddClip({
       sourceId: source.id,
       sourceName: source.name,
       file: source.file,
       url: source.url,
       duration: source.duration,
-      inPoint,
-      outPoint,
+      inPoint: marks.inPoint,
+      outPoint: marks.outPoint,
     })
   }
 
@@ -46,35 +35,32 @@ export default function SourceMonitor({ source, onAddClip }) {
         src={source.url}
         controls
         className="w-full rounded-lg bg-black"
-        onLoadedMetadata={() => {
-          setInPoint(0)
-          setOutPoint(source.duration)
-        }}
-        onTimeUpdate={(e) => setCurrentTime(e.currentTarget.currentTime)}
+        onLoadedMetadata={marks.resetMarks}
+        onTimeUpdate={(e) => marks.setCurrentTime(e.currentTarget.currentTime)}
       />
 
       <div className="flex flex-wrap items-center gap-3 text-sm">
-        <span className="text-slate-500">Playhead {formatTime(currentTime)}</span>
+        <span className="text-slate-500">Playhead {formatTime(marks.currentTime)}</span>
         <button
           type="button"
-          onClick={markIn}
+          onClick={marks.markIn}
           className="rounded bg-slate-200 px-3 py-1 font-medium hover:bg-slate-300"
         >
           Mark In
         </button>
-        <span>In {formatTime(inPoint)}</span>
+        <span>In {formatTime(marks.inPoint)}</span>
         <button
           type="button"
-          onClick={markOut}
+          onClick={marks.markOut}
           className="rounded bg-slate-200 px-3 py-1 font-medium hover:bg-slate-300"
         >
           Mark Out
         </button>
-        <span>Out {formatTime(outPoint)}</span>
+        <span>Out {formatTime(marks.outPoint)}</span>
         <button
           type="button"
           onClick={handleAdd}
-          disabled={outPoint <= inPoint}
+          disabled={marks.outPoint <= marks.inPoint}
           className="ml-auto rounded bg-indigo-600 px-4 py-1.5 font-medium text-white hover:bg-indigo-500 disabled:cursor-not-allowed disabled:bg-slate-300"
         >
           Add to Timeline
