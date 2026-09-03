@@ -2,6 +2,7 @@ import { useCallback, useRef, useState } from 'react'
 import { FFmpeg } from '@ffmpeg/ffmpeg'
 import { fetchFile, toBlobURL } from '@ffmpeg/util'
 import { buildFitFilter } from '../lib/resolution'
+import { clipLength } from '../lib/clip'
 
 // Self-hosted core (copied into public/ffmpeg) so nothing is fetched from a
 // third-party CDN and processing works fully offline after first load.
@@ -59,19 +60,42 @@ export function useFFmpeg() {
       setProgress(0)
 
       const written = []
+      // The same source can be cut into multiple timeline clips (e.g. three
+      // highlights pulled from one long recording), so write each unique
+      // source into the virtual FS once and reuse it, rather than
+      // re-reading and re-writing the whole file per clip.
+      const inputNames = new Map() // sourceId -> virtual FS filename
+      const remainingUses = new Map() // sourceId -> clips still needing it
+      for (const clip of clips) {
+        remainingUses.set(clip.sourceId, (remainingUses.get(clip.sourceId) ?? 0) + 1)
+      }
+
       try {
         const trimmedNames = []
 
         for (let i = 0; i < clips.length; i++) {
           const clip = clips[i]
           setStatusText(`Trimming clip ${i + 1} of ${clips.length}…`)
-          const inputName = `in${i}.${extensionOf(clip.file.name)}`
           const trimmedName = `trim${i}.mp4`
 
-          await ffmpeg.writeFile(inputName, await fetchFile(clip.file))
-          written.push(inputName)
+          let inputName = inputNames.get(clip.sourceId)
+          if (!inputName) {
+            inputName = `src${clip.sourceId}.${extensionOf(clip.file.name)}`
+            await ffmpeg.writeFile(inputName, await fetchFile(clip.file))
+            inputNames.set(clip.sourceId, inputName)
+            written.push(inputName)
+          }
 
-          const trimArgs = ['-ss', String(clip.inPoint), '-to', String(clip.outPoint), '-i', inputName]
+          // -ss after -i is "accurate" (output-side) seeking: ffmpeg decodes
+          // from the start of the input up to inPoint before writing
+          // anything, rather than fast-seeking the demuxer to the nearest
+          // keyframe. Slower on long sources, but it's what fixes audible
+          // A/V drift right at cut points - fast input seeking can let the
+          // video and audio streams snap to slightly different actual
+          // timestamps. -t (duration) is used instead of -to (absolute end
+          // time) because -to's meaning shifts once -ss becomes an output
+          // option; duration has no such ambiguity.
+          const trimArgs = ['-i', inputName, '-ss', String(clip.inPoint), '-t', String(clipLength(clip))]
           // Normalize every clip to the project resolution before concat: the
           // final join uses stream copy, which requires identical encoded
           // dimensions across every segment or it fails/corrupts the output.
@@ -84,10 +108,14 @@ export function useFFmpeg() {
           written.push(trimmedName)
           trimmedNames.push(trimmedName)
 
-          // Free the (possibly large) source file from the virtual FS now
-          // that the trimmed copy exists.
-          await ffmpeg.deleteFile(inputName)
-          written.splice(written.indexOf(inputName), 1)
+          // Free the source from the virtual FS once every clip referencing
+          // it has been trimmed, not eagerly per-clip.
+          const remaining = remainingUses.get(clip.sourceId) - 1
+          remainingUses.set(clip.sourceId, remaining)
+          if (remaining === 0) {
+            await ffmpeg.deleteFile(inputName)
+            written.splice(written.indexOf(inputName), 1)
+          }
         }
 
         setStatusText('Joining clips…')

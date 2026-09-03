@@ -23,9 +23,13 @@ export default function ClassicLayout({
   async function handleLoadFiles(fileList) {
     const file = Array.from(fileList).find((f) => f.type.startsWith('video/'))
     if (!file) return
-    const source = await loadVideoSource(file)
-    onAddSource(source)
-    onSelectSource(source.id)
+    try {
+      const source = await loadVideoSource(file)
+      onAddSource(source)
+      onSelectSource(source.id)
+    } catch (err) {
+      console.error('Failed to load video file:', err)
+    }
   }
 
   return (
