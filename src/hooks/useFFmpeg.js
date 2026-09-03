@@ -59,17 +59,31 @@ export function useFFmpeg() {
       setProgress(0)
 
       const written = []
+      // The same source can be cut into multiple timeline clips (e.g. three
+      // highlights pulled from one long recording), so write each unique
+      // source into the virtual FS once and reuse it, rather than
+      // re-reading and re-writing the whole file per clip.
+      const inputNames = new Map() // sourceId -> virtual FS filename
+      const remainingUses = new Map() // sourceId -> clips still needing it
+      for (const clip of clips) {
+        remainingUses.set(clip.sourceId, (remainingUses.get(clip.sourceId) ?? 0) + 1)
+      }
+
       try {
         const trimmedNames = []
 
         for (let i = 0; i < clips.length; i++) {
           const clip = clips[i]
           setStatusText(`Trimming clip ${i + 1} of ${clips.length}…`)
-          const inputName = `in${i}.${extensionOf(clip.file.name)}`
           const trimmedName = `trim${i}.mp4`
 
-          await ffmpeg.writeFile(inputName, await fetchFile(clip.file))
-          written.push(inputName)
+          let inputName = inputNames.get(clip.sourceId)
+          if (!inputName) {
+            inputName = `src${clip.sourceId}.${extensionOf(clip.file.name)}`
+            await ffmpeg.writeFile(inputName, await fetchFile(clip.file))
+            inputNames.set(clip.sourceId, inputName)
+            written.push(inputName)
+          }
 
           const trimArgs = ['-ss', String(clip.inPoint), '-to', String(clip.outPoint), '-i', inputName]
           // Normalize every clip to the project resolution before concat: the
@@ -84,10 +98,14 @@ export function useFFmpeg() {
           written.push(trimmedName)
           trimmedNames.push(trimmedName)
 
-          // Free the (possibly large) source file from the virtual FS now
-          // that the trimmed copy exists.
-          await ffmpeg.deleteFile(inputName)
-          written.splice(written.indexOf(inputName), 1)
+          // Free the source from the virtual FS once every clip referencing
+          // it has been trimmed, not eagerly per-clip.
+          const remaining = remainingUses.get(clip.sourceId) - 1
+          remainingUses.set(clip.sourceId, remaining)
+          if (remaining === 0) {
+            await ffmpeg.deleteFile(inputName)
+            written.splice(written.indexOf(inputName), 1)
+          }
         }
 
         setStatusText('Joining clips…')
