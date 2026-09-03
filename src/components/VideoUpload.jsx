@@ -6,8 +6,14 @@ export default function VideoUpload({ onAdd }) {
 
   async function handleFiles(fileList) {
     const files = Array.from(fileList).filter((f) => f.type.startsWith('video/'))
-    const sources = await Promise.all(files.map(loadVideoSource))
-    sources.forEach(onAdd)
+    const results = await Promise.allSettled(files.map(loadVideoSource))
+    for (const result of results) {
+      if (result.status === 'fulfilled') {
+        onAdd(result.value)
+      } else {
+        console.error('Failed to load video file:', result.reason)
+      }
+    }
   }
 
   return (
