@@ -2,6 +2,7 @@ import { useCallback, useRef, useState } from 'react'
 import { FFmpeg } from '@ffmpeg/ffmpeg'
 import { fetchFile, toBlobURL } from '@ffmpeg/util'
 import { buildFitFilter } from '../lib/resolution'
+import { clipLength } from '../lib/clip'
 
 // Self-hosted core (copied into public/ffmpeg) so nothing is fetched from a
 // third-party CDN and processing works fully offline after first load.
@@ -85,7 +86,16 @@ export function useFFmpeg() {
             written.push(inputName)
           }
 
-          const trimArgs = ['-ss', String(clip.inPoint), '-to', String(clip.outPoint), '-i', inputName]
+          // -ss after -i is "accurate" (output-side) seeking: ffmpeg decodes
+          // from the start of the input up to inPoint before writing
+          // anything, rather than fast-seeking the demuxer to the nearest
+          // keyframe. Slower on long sources, but it's what fixes audible
+          // A/V drift right at cut points - fast input seeking can let the
+          // video and audio streams snap to slightly different actual
+          // timestamps. -t (duration) is used instead of -to (absolute end
+          // time) because -to's meaning shifts once -ss becomes an output
+          // option; duration has no such ambiguity.
+          const trimArgs = ['-i', inputName, '-ss', String(clip.inPoint), '-t', String(clipLength(clip))]
           // Normalize every clip to the project resolution before concat: the
           // final join uses stream copy, which requires identical encoded
           // dimensions across every segment or it fails/corrupts the output.

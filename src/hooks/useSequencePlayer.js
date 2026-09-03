@@ -52,7 +52,7 @@ export function useSequencePlayer(clips) {
     setClipIndex(index)
   }, [])
 
-  const handleTimeUpdate = useCallback(() => {
+  const checkPosition = useCallback(() => {
     const video = videoRef.current
     const clip = clipsRef.current[clipIndex]
     if (!video || !clip) return
@@ -69,12 +69,41 @@ export function useSequencePlayer(clips) {
     }
   }, [clipIndex, isPlaying, loadClip, offsetOf])
 
+  // Drive cut-point detection from actual decoded frames rather than the
+  // 'timeupdate' event, which the spec only guarantees fires "4 to 66 times
+  // per second" - coarse enough to let playback overshoot an out-point by
+  // up to ~250ms before the swap to the next clip happens.
+  // requestVideoFrameCallback fires once per presented frame (frame-
+  // accurate, and it naturally stops when playback stops); this falls back
+  // to requestAnimationFrame, still much tighter than timeupdate, on
+  // browsers without it.
   useEffect(() => {
     const video = videoRef.current
-    if (!video) return
-    video.addEventListener('timeupdate', handleTimeUpdate)
-    return () => video.removeEventListener('timeupdate', handleTimeUpdate)
-  }, [handleTimeUpdate])
+    if (!video || !isPlaying) return
+
+    let cancelled = false
+    let handle = null
+    const useFrameCallback = typeof video.requestVideoFrameCallback === 'function'
+
+    function scheduleNext() {
+      if (cancelled) return
+      handle = useFrameCallback ? video.requestVideoFrameCallback(tick) : requestAnimationFrame(tick)
+    }
+
+    function tick() {
+      if (cancelled) return
+      checkPosition()
+      scheduleNext()
+    }
+
+    scheduleNext()
+
+    return () => {
+      cancelled = true
+      if (useFrameCallback) video.cancelVideoFrameCallback?.(handle)
+      else cancelAnimationFrame(handle)
+    }
+  }, [isPlaying, checkPosition])
 
   // Load the first clip whenever the sequence changes underneath us.
   useEffect(() => {
