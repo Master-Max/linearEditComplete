@@ -115,14 +115,16 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip }
         </div>
       </div>
       <br />
-      <div className="row">
-        <b
-          onClick={addToTimeline}
-          className="switch switch-big red-button"
-          style={{ opacity: source && marks.outPoint > marks.inPoint ? 1 : 0.4 }}
-        >
-          ADD TO TIMELINE
-        </b>
+      <div className="center-div">
+        <div className="row">
+          <b
+            onClick={addToTimeline}
+            className="switch switch-big red-button"
+            style={{ opacity: source && marks.outPoint > marks.inPoint ? 1 : 0.4 }}
+          >
+            ADD TO TIMELINE
+          </b>
+        </div>
       </div>
     </div>
   )
