@@ -15,6 +15,8 @@ export default function ClassicLayout({
   onRemoveClip,
   onMoveClip,
   ffmpeg,
+  resolution,
+  fitMode,
 }) {
   const fileInputRef = useRef(null)
 
@@ -36,7 +38,7 @@ export default function ClassicLayout({
           onAddClip={onAddClip}
         />
         <ClassicEditorConsole clips={clips} onRemove={onRemoveClip} onMove={onMoveClip} />
-        <ClassicRecorderDeck clips={clips} />
+        <ClassicRecorderDeck clips={clips} fitMode={fitMode} />
       </div>
 
       <input
@@ -49,7 +51,7 @@ export default function ClassicLayout({
 
       <div id="controls">
         <div className="export-wrap">
-          <ExportPanel clips={clips} ffmpeg={ffmpeg} />
+          <ExportPanel clips={clips} ffmpeg={ffmpeg} resolution={resolution} fitMode={fitMode} />
         </div>
       </div>
     </div>

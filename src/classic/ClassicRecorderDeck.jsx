@@ -1,7 +1,7 @@
 import { useSequencePlayer } from '../hooks/useSequencePlayer'
 import { formatTimecode } from './formatTimecode'
 
-export default function ClassicRecorderDeck({ clips }) {
+export default function ClassicRecorderDeck({ clips, fitMode }) {
   const player = useSequencePlayer(clips)
 
   function skip(delta) {
@@ -18,7 +18,7 @@ export default function ClassicRecorderDeck({ clips }) {
       <div className="clock">{formatTimecode(player.globalTime)}</div>
 
       {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
-      <video ref={player.videoRef} />
+      <video ref={player.videoRef} style={{ objectFit: fitMode === 'crop' ? 'cover' : 'contain' }} />
 
       <div className="center-div">
         <div className="row">

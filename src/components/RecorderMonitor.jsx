@@ -1,7 +1,7 @@
 import { useSequencePlayer } from '../hooks/useSequencePlayer'
 import { formatTime } from '../lib/format'
 
-export default function RecorderMonitor({ clips }) {
+export default function RecorderMonitor({ clips, resolution, fitMode }) {
   const player = useSequencePlayer(clips)
 
   if (clips.length === 0) {
@@ -12,10 +12,20 @@ export default function RecorderMonitor({ clips }) {
     )
   }
 
+  // Lock the preview box to the project's aspect ratio so playback doesn't
+  // jump in size/shape as it crosses into a clip of a different resolution;
+  // object-fit mirrors the letterbox/crop treatment the export will apply.
+  const aspectRatio =
+    resolution?.width && resolution?.height ? `${resolution.width} / ${resolution.height}` : '16 / 9'
+
   return (
     <div className="flex flex-col gap-3">
       {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
-      <video ref={player.videoRef} className="w-full rounded-lg bg-black" />
+      <video
+        ref={player.videoRef}
+        className="w-full rounded-lg bg-black"
+        style={{ aspectRatio, objectFit: fitMode === 'crop' ? 'cover' : 'contain' }}
+      />
 
       <input
         type="range"

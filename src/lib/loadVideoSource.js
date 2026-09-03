@@ -7,7 +7,15 @@ export function loadVideoSource(file) {
     video.preload = 'metadata'
     video.src = url
     video.onloadedmetadata = () => {
-      resolve({ id: nextSourceId++, file, url, name: file.name, duration: video.duration })
+      resolve({
+        id: nextSourceId++,
+        file,
+        url,
+        name: file.name,
+        duration: video.duration,
+        width: video.videoWidth,
+        height: video.videoHeight,
+      })
     }
   })
 }

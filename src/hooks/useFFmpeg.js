@@ -1,6 +1,7 @@
 import { useCallback, useRef, useState } from 'react'
 import { FFmpeg } from '@ffmpeg/ffmpeg'
 import { fetchFile, toBlobURL } from '@ffmpeg/util'
+import { buildFitFilter } from '../lib/resolution'
 
 // Self-hosted core (copied into public/ffmpeg) so nothing is fetched from a
 // third-party CDN and processing works fully offline after first load.
@@ -52,7 +53,7 @@ export function useFFmpeg() {
   }, [])
 
   const exportSequence = useCallback(
-    async (clips) => {
+    async (clips, { width, height, fitMode = 'letterbox' } = {}) => {
       const ffmpeg = ffmpegRef.current ?? (await load())
       setError(null)
       setProgress(0)
@@ -70,15 +71,16 @@ export function useFFmpeg() {
           await ffmpeg.writeFile(inputName, await fetchFile(clip.file))
           written.push(inputName)
 
-          await ffmpeg.exec([
-            '-ss', String(clip.inPoint),
-            '-to', String(clip.outPoint),
-            '-i', inputName,
-            '-c:v', 'libx264',
-            '-preset', 'ultrafast',
-            '-c:a', 'aac',
-            trimmedName,
-          ])
+          const trimArgs = ['-ss', String(clip.inPoint), '-to', String(clip.outPoint), '-i', inputName]
+          // Normalize every clip to the project resolution before concat: the
+          // final join uses stream copy, which requires identical encoded
+          // dimensions across every segment or it fails/corrupts the output.
+          if (width && height) {
+            trimArgs.push('-vf', buildFitFilter(fitMode, width, height))
+          }
+          trimArgs.push('-c:v', 'libx264', '-preset', 'ultrafast', '-c:a', 'aac', trimmedName)
+
+          await ffmpeg.exec(trimArgs)
           written.push(trimmedName)
           trimmedNames.push(trimmedName)
 

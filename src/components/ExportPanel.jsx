@@ -1,6 +1,6 @@
 import { useState } from 'react'
 
-export default function ExportPanel({ clips, ffmpeg }) {
+export default function ExportPanel({ clips, ffmpeg, resolution, fitMode }) {
   const [resultUrl, setResultUrl] = useState(null)
   const [exporting, setExporting] = useState(false)
 
@@ -11,7 +11,11 @@ export default function ExportPanel({ clips, ffmpeg }) {
     if (resultUrl) URL.revokeObjectURL(resultUrl)
     setResultUrl(null)
     try {
-      const url = await ffmpeg.exportSequence(clips)
+      const url = await ffmpeg.exportSequence(clips, {
+        width: resolution?.width,
+        height: resolution?.height,
+        fitMode,
+      })
       setResultUrl(url)
     } catch {
       // ffmpeg.error already carries the message; surfaced below.
