@@ -3,6 +3,7 @@ import { loadVideoSource } from '../lib/loadVideoSource'
 import ClassicPlayerDeck from './ClassicPlayerDeck'
 import ClassicEditorConsole from './ClassicEditorConsole'
 import ClassicRecorderDeck from './ClassicRecorderDeck'
+import ClassicProjectSettings from './ClassicProjectSettings'
 import ExportPanel from '../components/ExportPanel'
 import './classic.css'
 
@@ -15,8 +16,11 @@ export default function ClassicLayout({
   onRemoveClip,
   onMoveClip,
   ffmpeg,
+  projectResolution,
+  onResolutionChange,
   resolution,
   fitMode,
+  onFitModeChange,
 }) {
   const fileInputRef = useRef(null)
 
@@ -34,6 +38,14 @@ export default function ClassicLayout({
 
   return (
     <div className="classic-editor">
+      <ClassicProjectSettings
+        resolution={projectResolution}
+        onResolutionChange={onResolutionChange}
+        effectiveResolution={resolution}
+        fitMode={fitMode}
+        onFitModeChange={onFitModeChange}
+      />
+
       <div id="monitors" className="flexy">
         <ClassicPlayerDeck
           source={selectedSource}

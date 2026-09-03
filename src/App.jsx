@@ -133,16 +133,6 @@ export default function App() {
         </div>
       </header>
 
-      <div className="mx-auto max-w-5xl px-6 pt-4">
-        <ProjectSettings
-          resolution={projectResolution}
-          onResolutionChange={setProjectResolution}
-          effectiveResolution={effectiveResolution}
-          fitMode={fitMode}
-          onFitModeChange={setFitMode}
-        />
-      </div>
-
       {layout === 'classic' ? (
         <ClassicLayout
           selectedSource={selectedSource}
@@ -153,11 +143,22 @@ export default function App() {
           onRemoveClip={handleRemoveClip}
           onMoveClip={handleMoveClip}
           ffmpeg={ffmpeg}
+          projectResolution={projectResolution}
+          onResolutionChange={setProjectResolution}
           resolution={effectiveResolution}
           fitMode={fitMode}
+          onFitModeChange={setFitMode}
         />
       ) : (
         <main className="mx-auto flex max-w-5xl flex-col gap-6 px-6 py-6">
+          <ProjectSettings
+            resolution={projectResolution}
+            onResolutionChange={setProjectResolution}
+            effectiveResolution={effectiveResolution}
+            fitMode={fitMode}
+            onFitModeChange={setFitMode}
+          />
+
           <VideoUpload onAdd={handleAddSource} />
 
           <SourceList sources={sources} selectedId={selectedSourceId} onSelect={setSelectedSourceId} />
