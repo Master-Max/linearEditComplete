@@ -195,7 +195,8 @@
   cursor: not-allowed;
 }
 
-.classic-editor .switch:active {
+.classic-editor .switch:active,
+.classic-editor .switch.key-active {
   text-shadow: 0 0 1px white, 0 0 1px white, 0 0 2px white;
   transform: translate(0, 2px);
 }

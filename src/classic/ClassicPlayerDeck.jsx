@@ -1,6 +1,19 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { usePlayerMarks } from '../hooks/usePlayerMarks'
 import { formatTimecode } from './formatTimecode'
+
+// Maps each shortcut key to the switch it should visually "press" while
+// held, so keyboard use gets the same :active feedback as a mouse click.
+const KEY_ACTIONS = {
+  ' ': 'play',
+  k: 'still',
+  j: 'rewind',
+  l: 'fastForward',
+  i: 'markIn',
+  o: 'markOut',
+  arrowleft: 'jogLeft',
+  arrowright: 'jogRight',
+}
 
 export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip }) {
   const videoRef = useRef(null)
@@ -14,6 +27,12 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip }
   // otherwise thrash the listener many times a second.
   const marksRef = useRef(marks)
   marksRef.current = marks
+
+  const [pressedActions, setPressedActions] = useState(() => new Set())
+
+  function keyClass(action) {
+    return pressedActions.has(action) ? ' key-active' : ''
+  }
 
   useEffect(() => () => clearInterval(rewindTimer.current), [])
 
@@ -72,9 +91,12 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip }
     })
   }
 
-  // JKL-style transport shortcuts, mirroring the deck's own buttons.
-  // Skipped while focus is in a form control (e.g. the resolution panel's
-  // selects/radios) so native typing/selection isn't hijacked.
+  // JKL-style transport shortcuts, mirroring the deck's own buttons - held
+  // keys also flip the matching switch into its :active look (see
+  // key-active in classic.css) so keyboard use gets the same press
+  // feedback as a click. Skipped while focus is in a form control (e.g.
+  // the resolution panel's selects/radios) so native typing/selection
+  // isn't hijacked.
   useEffect(() => {
     function isTypingTarget(el) {
       if (!el) return false
@@ -82,35 +104,30 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip }
       return tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA' || el.isContentEditable
     }
 
-    function handleKeyDown(e) {
-      if (e.ctrlKey || e.metaKey || e.altKey || isTypingTarget(document.activeElement)) return
-
-      switch (e.key.toLowerCase()) {
-        case ' ':
-          e.preventDefault()
+    function runAction(action) {
+      switch (action) {
+        case 'play':
           play()
           break
-        case 'k':
+        case 'still':
           still()
           break
-        case 'j':
+        case 'rewind':
           rewind()
           break
-        case 'l':
+        case 'fastForward':
           fastForward()
           break
-        case 'i':
+        case 'markIn':
           marksRef.current.markIn()
           break
-        case 'o':
+        case 'markOut':
           marksRef.current.markOut()
           break
-        case 'arrowleft':
-          e.preventDefault()
+        case 'jogLeft':
           jog(-1 / 30)
           break
-        case 'arrowright':
-          e.preventDefault()
+        case 'jogRight':
           jog(1 / 30)
           break
         default:
@@ -118,8 +135,42 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip }
       }
     }
 
+    function handleKeyDown(e) {
+      if (e.ctrlKey || e.metaKey || e.altKey || isTypingTarget(document.activeElement)) return
+      const action = KEY_ACTIONS[e.key.toLowerCase()]
+      if (!action) return
+      e.preventDefault()
+      setPressedActions((prev) => (prev.has(action) ? prev : new Set(prev).add(action)))
+      // Key repeat re-fires keydown without a keyup in between - only run
+      // the action on the initial press, not every repeat tick.
+      if (!e.repeat) runAction(action)
+    }
+
+    function handleKeyUp(e) {
+      const action = KEY_ACTIONS[e.key.toLowerCase()]
+      if (!action) return
+      setPressedActions((prev) => {
+        if (!prev.has(action)) return prev
+        const next = new Set(prev)
+        next.delete(action)
+        return next
+      })
+    }
+
+    // Alt-tabbing away (or anything else that eats the keyup) shouldn't
+    // leave a switch stuck looking pressed.
+    function handleBlur() {
+      setPressedActions((prev) => (prev.size === 0 ? prev : new Set()))
+    }
+
     window.addEventListener('keydown', handleKeyDown)
-    return () => window.removeEventListener('keydown', handleKeyDown)
+    window.addEventListener('keyup', handleKeyUp)
+    window.addEventListener('blur', handleBlur)
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown)
+      window.removeEventListener('keyup', handleKeyUp)
+      window.removeEventListener('blur', handleBlur)
+    }
     // play/still/rewind/fastForward/jog close only over stable refs, so a
     // mount-once listener behaves the same as one rebuilt every render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -152,17 +203,17 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip }
       <br />
       <div className="center-div">
         <div className="row">
-          <b onClick={play} className="switch">PLAY</b>
-          <b onClick={still} className="switch">STILL</b>
-          <b onClick={rewind} className="switch">REW</b>
-          <b onClick={fastForward} className="switch">FF</b>
+          <b onClick={play} className={`switch${keyClass('play')}`}>PLAY</b>
+          <b onClick={still} className={`switch${keyClass('still')}`}>STILL</b>
+          <b onClick={rewind} className={`switch${keyClass('rewind')}`}>REW</b>
+          <b onClick={fastForward} className={`switch${keyClass('fastForward')}`}>FF</b>
         </div>
       </div>
       <br />
       <div className="center-div">
         <div className="row">
-          <b onClick={marks.markIn} className="switch grey-button">MARK IN</b>
-          <b onClick={marks.markOut} className="switch grey-button">MARK OUT</b>
+          <b onClick={marks.markIn} className={`switch grey-button${keyClass('markIn')}`}>MARK IN</b>
+          <b onClick={marks.markOut} className={`switch grey-button${keyClass('markOut')}`}>MARK OUT</b>
         </div>
       </div>
       <br />
@@ -171,8 +222,8 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip }
           <b className="light">JOG</b>
         </div>
         <div className="row">
-          <b onClick={() => jog(-1 / 30)} className="switch">{'<'}</b>
-          <b onClick={() => jog(1 / 30)} className="switch">{'>'}</b>
+          <b onClick={() => jog(-1 / 30)} className={`switch${keyClass('jogLeft')}`}>{'<'}</b>
+          <b onClick={() => jog(1 / 30)} className={`switch${keyClass('jogRight')}`}>{'>'}</b>
         </div>
       </div>
       <br />
