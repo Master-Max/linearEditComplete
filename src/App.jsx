@@ -14,9 +14,10 @@ import { resolutionsMatch } from './lib/resolution'
 import { isResolutionWarningDismissed, dismissResolutionWarningPermanently } from './lib/resolutionWarningPref'
 import { useFFmpeg } from './hooks/useFFmpeg'
 import { useToasts } from './hooks/useToasts'
+import { getLayoutFromLocation, navigateToLayout } from './lib/route'
 
 export default function App() {
-  const [layout, setLayout] = useState('modern')
+  const [layout, setLayout] = useState(() => getLayoutFromLocation())
   const [sources, setSources] = useState([])
   const [selectedSourceId, setSelectedSourceId] = useState(null)
   const [clips, setClips] = useState([])
@@ -35,6 +36,25 @@ export default function App() {
     const first = sources[0]
     return { width: first?.width ?? null, height: first?.height ?? null }
   }, [projectResolution, sources])
+
+  // Keep layout state in sync with the address bar (browser back/forward,
+  // or a direct load of /classic - see src/lib/route.js).
+  useEffect(() => {
+    function onPopState() {
+      setLayout(getLayoutFromLocation())
+    }
+    window.addEventListener('popstate', onPopState)
+    return () => window.removeEventListener('popstate', onPopState)
+  }, [])
+
+  useEffect(() => {
+    document.title = layout === 'classic' ? 'Linear Edit — Classic' : 'Linear Edit'
+  }, [layout])
+
+  function switchLayout(next) {
+    navigateToLayout(next)
+    setLayout(next)
+  }
 
   // Eagerly load ffmpeg on mount rather than waiting for the first export
   // click, so a device that can't run it (WASM disabled, blocked by a CSP,
@@ -114,7 +134,7 @@ export default function App() {
         <div className="flex shrink-0 gap-1 rounded-lg bg-slate-100 p-1 text-sm">
           <button
             type="button"
-            onClick={() => setLayout('modern')}
+            onClick={() => switchLayout('modern')}
             className={`rounded px-3 py-1 font-medium ${
               layout === 'modern' ? 'bg-white shadow text-slate-800' : 'text-slate-500'
             }`}
@@ -123,7 +143,7 @@ export default function App() {
           </button>
           <button
             type="button"
-            onClick={() => setLayout('classic')}
+            onClick={() => switchLayout('classic')}
             className={`rounded px-3 py-1 font-medium ${
               layout === 'classic' ? 'bg-white shadow text-slate-800' : 'text-slate-500'
             }`}
