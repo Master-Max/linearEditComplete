@@ -92,7 +92,7 @@
   text-align: center;
 }
 
-.classic-editor #player {
+.classic-editor .load-eject-row {
   position: relative;
 }
 
@@ -217,7 +217,9 @@
 
 .classic-editor .key-help-button {
   position: absolute;
-  top: 8px;
+  /* Matches .switch's own 4px margin, so this lines up with the top edge
+     of the LOAD/EJECT buttons in the row it shares a wrapper with. */
+  top: 4px;
   left: 8px;
   width: 26px;
   height: 26px;

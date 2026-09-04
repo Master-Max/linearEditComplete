@@ -197,16 +197,6 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip }
 
   return (
     <div id="player">
-      <button
-        type="button"
-        onClick={() => setShowKeyHints((v) => !v)}
-        className={`key-help-button${showKeyHints ? ' active' : ''}`}
-        aria-pressed={showKeyHints}
-        aria-label="Show keyboard shortcuts"
-        title="Show keyboard shortcuts"
-      >
-        ?
-      </button>
       <p>PLAYER</p>
       <div className="row right-justify">
         <b className={marks.inPoint > 0 ? 'light lock' : 'light'}>IN</b>
@@ -223,10 +213,22 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip }
         onTimeUpdate={(e) => marks.setCurrentTime(e.currentTarget.currentTime)}
       />
 
-      <div className="center-div">
-        <div className="row">
-          <b onClick={onLoad} className="switch blue-button">LOAD</b>
-          <b onClick={onEject} className="switch blue-button">EJECT</b>
+      <div className="load-eject-row">
+        <button
+          type="button"
+          onClick={() => setShowKeyHints((v) => !v)}
+          className={`key-help-button${showKeyHints ? ' active' : ''}`}
+          aria-pressed={showKeyHints}
+          aria-label="Show keyboard shortcuts"
+          title="Show keyboard shortcuts"
+        >
+          ?
+        </button>
+        <div className="center-div">
+          <div className="row">
+            <b onClick={onLoad} className="switch blue-button">LOAD</b>
+            <b onClick={onEject} className="switch blue-button">EJECT</b>
+          </div>
         </div>
       </div>
       <br />
