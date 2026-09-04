@@ -7,6 +7,14 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip }
   const marks = usePlayerMarks(videoRef, source)
   const rewindTimer = useRef(null)
 
+  // markIn/markOut close over inPoint/outPoint state, so the keydown
+  // listener below (mounted once) reads them through a ref that's kept
+  // fresh every render, rather than depending on `marks` directly - marks
+  // itself changes on every currentTime tick during playback, which would
+  // otherwise thrash the listener many times a second.
+  const marksRef = useRef(marks)
+  marksRef.current = marks
+
   useEffect(() => () => clearInterval(rewindTimer.current), [])
 
   function play() {
@@ -63,6 +71,59 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip }
       outPoint: marks.outPoint,
     })
   }
+
+  // JKL-style transport shortcuts, mirroring the deck's own buttons.
+  // Skipped while focus is in a form control (e.g. the resolution panel's
+  // selects/radios) so native typing/selection isn't hijacked.
+  useEffect(() => {
+    function isTypingTarget(el) {
+      if (!el) return false
+      const tag = el.tagName
+      return tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA' || el.isContentEditable
+    }
+
+    function handleKeyDown(e) {
+      if (e.ctrlKey || e.metaKey || e.altKey || isTypingTarget(document.activeElement)) return
+
+      switch (e.key.toLowerCase()) {
+        case ' ':
+          e.preventDefault()
+          play()
+          break
+        case 'k':
+          still()
+          break
+        case 'j':
+          rewind()
+          break
+        case 'l':
+          fastForward()
+          break
+        case 'i':
+          marksRef.current.markIn()
+          break
+        case 'o':
+          marksRef.current.markOut()
+          break
+        case 'arrowleft':
+          e.preventDefault()
+          jog(-1 / 30)
+          break
+        case 'arrowright':
+          e.preventDefault()
+          jog(1 / 30)
+          break
+        default:
+          break
+      }
+    }
+
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+    // play/still/rewind/fastForward/jog close only over stable refs, so a
+    // mount-once listener behaves the same as one rebuilt every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   return (
     <div id="player">

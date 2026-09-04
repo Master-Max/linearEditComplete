@@ -34,6 +34,13 @@ This repo is set up to deploy to GitHub Pages as a project page
   self-hosted ffmpeg core is fetched from the same subpath.
 - `.github/workflows/deploy.yml` builds the app (`npm run build`) and
   publishes `dist/` via `actions/deploy-pages` on every push to `main`.
+- `scripts/copy-classic-html.mjs` (run as part of `npm run build`)
+  duplicates `dist/index.html` into `dist/classic/index.html` so a direct
+  load of `/classic` works. GitHub Pages has no server-side rewrite to
+  fall back to `index.html` for an unknown path the way a dev server's SPA
+  middleware does, so the Classic layout's own URL needs a real file on
+  disk; the app itself picks the layout from `location.pathname` (see
+  `src/lib/route.js`).
 
 To turn it on: in the repo's Settings → Pages, set **Source** to "GitHub
 Actions". The workflow runs on the next push to `main` and publishes the
