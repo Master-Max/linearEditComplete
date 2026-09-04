@@ -11,8 +11,21 @@ const KEY_ACTIONS = {
   l: 'fastForward',
   i: 'markIn',
   o: 'markOut',
-  arrowleft: 'jogLeft',
-  arrowright: 'jogRight',
+  ',': 'jogLeft',
+  '.': 'jogRight',
+}
+
+// Display label for each action's badge, shown over its button when key
+// hints are toggled on.
+const ACTION_KEY_LABELS = {
+  play: 'SPACE',
+  still: 'K',
+  rewind: 'J',
+  fastForward: 'L',
+  markIn: 'I',
+  markOut: 'O',
+  jogLeft: '<',
+  jogRight: '>',
 }
 
 export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip }) {
@@ -29,9 +42,15 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip }
   marksRef.current = marks
 
   const [pressedActions, setPressedActions] = useState(() => new Set())
+  const [showKeyHints, setShowKeyHints] = useState(false)
 
   function keyClass(action) {
     return pressedActions.has(action) ? ' key-active' : ''
+  }
+
+  function keyHint(action) {
+    if (!showKeyHints) return null
+    return <span className="key-hint">{ACTION_KEY_LABELS[action]}</span>
   }
 
   useEffect(() => () => clearInterval(rewindTimer.current), [])
@@ -194,26 +213,56 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip }
         onTimeUpdate={(e) => marks.setCurrentTime(e.currentTarget.currentTime)}
       />
 
-      <div className="center-div">
-        <div className="row">
-          <b onClick={onLoad} className="switch blue-button">LOAD</b>
-          <b onClick={onEject} className="switch blue-button">EJECT</b>
+      <div className="load-eject-row">
+        <button
+          type="button"
+          onClick={() => setShowKeyHints((v) => !v)}
+          className={`key-help-button${showKeyHints ? ' active' : ''}`}
+          aria-pressed={showKeyHints}
+          aria-label="Show keyboard shortcuts"
+          title="Show keyboard shortcuts"
+        >
+          ?
+        </button>
+        <div className="center-div">
+          <div className="row">
+            <b onClick={onLoad} className="switch blue-button">LOAD</b>
+            <b onClick={onEject} className="switch blue-button">EJECT</b>
+          </div>
         </div>
       </div>
       <br />
       <div className="center-div">
         <div className="row">
-          <b onClick={play} className={`switch${keyClass('play')}`}>PLAY</b>
-          <b onClick={still} className={`switch${keyClass('still')}`}>STILL</b>
-          <b onClick={rewind} className={`switch${keyClass('rewind')}`}>REW</b>
-          <b onClick={fastForward} className={`switch${keyClass('fastForward')}`}>FF</b>
+          <b onClick={play} className={`switch${keyClass('play')}`}>
+            PLAY
+            {keyHint('play')}
+          </b>
+          <b onClick={still} className={`switch${keyClass('still')}`}>
+            STILL
+            {keyHint('still')}
+          </b>
+          <b onClick={rewind} className={`switch${keyClass('rewind')}`}>
+            REW
+            {keyHint('rewind')}
+          </b>
+          <b onClick={fastForward} className={`switch${keyClass('fastForward')}`}>
+            FF
+            {keyHint('fastForward')}
+          </b>
         </div>
       </div>
       <br />
       <div className="center-div">
         <div className="row">
-          <b onClick={marks.markIn} className={`switch grey-button${keyClass('markIn')}`}>MARK IN</b>
-          <b onClick={marks.markOut} className={`switch grey-button${keyClass('markOut')}`}>MARK OUT</b>
+          <b onClick={marks.markIn} className={`switch grey-button${keyClass('markIn')}`}>
+            MARK IN
+            {keyHint('markIn')}
+          </b>
+          <b onClick={marks.markOut} className={`switch grey-button${keyClass('markOut')}`}>
+            MARK OUT
+            {keyHint('markOut')}
+          </b>
         </div>
       </div>
       <br />
@@ -222,8 +271,14 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip }
           <b className="light">JOG</b>
         </div>
         <div className="row">
-          <b onClick={() => jog(-1 / 30)} className={`switch${keyClass('jogLeft')}`}>{'<'}</b>
-          <b onClick={() => jog(1 / 30)} className={`switch${keyClass('jogRight')}`}>{'>'}</b>
+          <b onClick={() => jog(-1 / 30)} className={`switch${keyClass('jogLeft')}`}>
+            {'<'}
+            {keyHint('jogLeft')}
+          </b>
+          <b onClick={() => jog(1 / 30)} className={`switch${keyClass('jogRight')}`}>
+            {'>'}
+            {keyHint('jogRight')}
+          </b>
         </div>
       </div>
       <br />
