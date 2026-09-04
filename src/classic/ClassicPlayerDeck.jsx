@@ -60,7 +60,11 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip }
     const v = videoRef.current
     if (!v) return
     v.playbackRate = 1
-    v.play()
+    // play() returns a promise that rejects with AbortError if the play
+    // request gets interrupted (e.g. a pause()/another play() call lands
+    // before it resolves - REW does exactly that). Expected and harmless,
+    // but needs a catch or it surfaces as an unhandled rejection.
+    v.play().catch(() => {})
   }
 
   function still() {
@@ -73,7 +77,7 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip }
     const v = videoRef.current
     if (!v) return
     v.playbackRate = 4
-    v.play()
+    v.play().catch(() => {})
   }
 
   function rewind() {
@@ -83,8 +87,14 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip }
     v.pause()
     // HTML5 video can't play backwards, so REW is emulated by stepping
     // currentTime back on a short interval — the same trick the original
-    // PlayerMonitor used for its reverse() transport.
+    // PlayerMonitor used for its reverse() transport. Skipping a tick
+    // while the video is still mid-seek (v.seeking) matters on a real,
+    // longer video: a single seek can take longer than this interval, and
+    // firing the next one before the last one resolves piles up seek
+    // requests faster than the browser can process them - which reads as
+    // the player freezing.
     rewindTimer.current = setInterval(() => {
+      if (v.seeking) return
       v.currentTime = Math.max(0, v.currentTime - 0.08)
       if (v.currentTime <= 0) clearInterval(rewindTimer.current)
     }, 20)
