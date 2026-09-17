@@ -5,11 +5,22 @@ import { createFile, DataStream, Endianness } from 'mp4box'
 // See "WebCodecs-based scrub/rewind" in ROADMAP.md for the full picture.
 // This module covers just the demux+decode+cache piece: given a video File,
 // it demuxes with mp4box.js and decodes with WebCodecs' VideoDecoder into a
-// small cache of already-decoded VideoFrames around the current GOP, so a
-// caller can walk backward through frames it already has instead of
-// reseeking the underlying <video> element on every step (see "Player deck
-// REW runs slower than FF" in TECHDEBT.md for why reseeking is the
-// expensive part).
+// small cache of already-decoded VideoFrames around the current position, so
+// a caller can walk through frames it already has instead of reseeking the
+// underlying <video> element on every step (see "Player deck REW runs
+// slower than FF" in TECHDEBT.md for why reseeking is the expensive part).
+//
+// Beyond the GOP containing the most recently requested time, this also
+// keeps a small window of neighboring GOPs decoded ahead of time (see
+// WINDOW_RADIUS_GOPS below) - a background decode kicked off after every
+// getFrameAtOrBefore() call, not awaited by the caller - so that scrubbing
+// or jogging across a GOP boundary is usually a cache hit instead of a
+// fresh decode-and-wait. It's all one VideoDecoder instance, so this
+// prefetch work and any "must have this frame right now" request share the
+// same decode queue: a request that lands while a prefetch decode is
+// in-flight waits for it, same as it always would have waited for its own
+// on-demand decode - never worse than before this existed, and usually
+// free because the wait already happened in the background.
 //
 // Scope: MP4/MOV containers with an AVC (H.264) or HEVC (H.265) video
 // track - the common case for footage recorded on phones/most cameras, and
@@ -17,6 +28,13 @@ import { createFile, DataStream, Endianness } from 'mp4box'
 // WebM/VP9/AV1 sources, containers mp4box can't parse, or a codec string
 // VideoDecoder rejects all fail init() and the caller is expected to fall
 // back to the existing <video> currentTime-stepping REW.
+
+// How many GOPs on each side of the current one to keep decoded and ready.
+// 1 covers a single step across a boundary (REW/FF/jog's normal case); raise
+// it if jogging or scrubbing tends to cross more than one boundary between
+// requests on real footage, at the cost of more decoded frames held in
+// memory at once.
+const WINDOW_RADIUS_GOPS = 1
 
 export function isFrameCacheSupported() {
   return typeof VideoDecoder !== 'undefined' && typeof EncodedVideoChunk !== 'undefined'
@@ -81,14 +99,19 @@ function demux(file) {
 }
 
 export class VideoFrameCache {
-  constructor(file) {
+  constructor(file, { windowRadiusGops = WINDOW_RADIUS_GOPS } = {}) {
     this.file = file
+    this.windowRadiusGops = windowRadiusGops
     this.decoder = null
     this.decodeOrderSamples = []
-    this.keyframeIndices = []
-    this.keyframeTimesUs = []
-    this.currentGopStart = -1
-    this.frames = new Map() // presentationTimeUs -> VideoFrame
+    this.keyframeIndices = [] // sample index of each GOP's start, ascending
+    this.keyframeTimesUs = [] // parallel to keyframeIndices
+    this.currentGopStart = -1 // GOP most recently actually requested
+    this.frames = new Map() // presentationTimeUs -> VideoFrame, across every retained GOP
+    this.decodedGops = new Map() // gopStartIndex -> timestampsUs decoded for it (for eviction)
+    this.pendingGops = new Map() // gopStartIndex -> in-flight decode Promise
+    this.decodeQueue = Promise.resolve() // serializes decode+flush jobs on the single decoder
+    this.activeDecodeTimestamps = null // set while a decode job is running; output() pushes here
   }
 
   async init() {
@@ -114,7 +137,10 @@ export class VideoFrameCache {
     if (this.keyframeIndices.length === 0) throw new Error('no keyframes found')
 
     this.decoder = new VideoDecoder({
-      output: (frame) => this.frames.set(frame.timestamp, frame),
+      output: (frame) => {
+        this.frames.set(frame.timestamp, frame)
+        this.activeDecodeTimestamps?.push(frame.timestamp)
+      },
       error: (err) => console.error('VideoFrameCache decode error', err),
     })
     this.decoder.configure(config)
@@ -139,6 +165,32 @@ export class VideoFrameCache {
     return this.keyframeIndices[ans]
   }
 
+  // Binary search keyframeIndices for gopStartIndex's own position in GOP
+  // order (as opposed to _findGopStartIndex, which searches by time) - lets
+  // _windowGopStarts walk to actual neighboring GOPs regardless of how long
+  // each one runs.
+  _keyframeOrdinal(gopStartIndex) {
+    let lo = 0
+    let hi = this.keyframeIndices.length - 1
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1
+      if (this.keyframeIndices[mid] === gopStartIndex) return mid
+      if (this.keyframeIndices[mid] < gopStartIndex) lo = mid + 1
+      else hi = mid - 1
+    }
+    return -1
+  }
+
+  _windowGopStarts(centerGopStart) {
+    const ord = this._keyframeOrdinal(centerGopStart)
+    const result = []
+    for (let d = -this.windowRadiusGops; d <= this.windowRadiusGops; d++) {
+      const idx = ord + d
+      if (idx >= 0 && idx < this.keyframeIndices.length) result.push(this.keyframeIndices[idx])
+    }
+    return result
+  }
+
   _bestCachedFrame(targetUs) {
     let bestKey = -1
     for (const key of this.frames.keys()) {
@@ -156,15 +208,17 @@ export class VideoFrameCache {
   }
 
   async _decodeGop(gopStartIndex) {
-    if (this.currentGopStart !== gopStartIndex) {
-      for (const frame of this.frames.values()) frame.close()
-      this.frames.clear()
-    }
-
     let endIndex = gopStartIndex + 1
     while (endIndex < this.decodeOrderSamples.length && !this.decodeOrderSamples[endIndex].is_sync) {
       endIndex++
     }
+
+    // Safe because decode jobs are serialized through decodeQueue (see
+    // _ensureGopDecoded) - only one job is ever actually running against the
+    // decoder at a time, so the fixed output() callback set in init() can
+    // attribute every frame it receives to whichever job is current.
+    const timestamps = []
+    this.activeDecodeTimestamps = timestamps
 
     for (let i = gopStartIndex; i < endIndex; i++) {
       const s = this.decodeOrderSamples[i]
@@ -178,7 +232,58 @@ export class VideoFrameCache {
       )
     }
     await this.decoder.flush()
-    this.currentGopStart = gopStartIndex
+    this.activeDecodeTimestamps = null
+    this.decodedGops.set(gopStartIndex, timestamps)
+  }
+
+  // Decodes a GOP if it isn't already decoded or already being decoded,
+  // sharing the in-flight promise with any other caller asking for the same
+  // one (a request landing mid-prefetch waits on that same prefetch rather
+  // than starting a redundant second decode).
+  _ensureGopDecoded(gopStartIndex) {
+    if (this.decodedGops.has(gopStartIndex)) return Promise.resolve()
+    const pending = this.pendingGops.get(gopStartIndex)
+    if (pending) return pending
+
+    const job = this.decodeQueue.then(() => this._decodeGop(gopStartIndex))
+    // Keep the queue alive even if this job fails, so a later request for a
+    // different GOP isn't stuck behind a rejected one.
+    this.decodeQueue = job.catch(() => {})
+    this.pendingGops.set(gopStartIndex, job)
+    job.finally(() => this.pendingGops.delete(gopStartIndex))
+    return job
+  }
+
+  _evictGop(gopStartIndex) {
+    const timestamps = this.decodedGops.get(gopStartIndex)
+    if (!timestamps) return
+    for (const ts of timestamps) {
+      this.frames.get(ts)?.close()
+      this.frames.delete(ts)
+    }
+    this.decodedGops.delete(gopStartIndex)
+  }
+
+  _evictOutsideWindow(centerGopStart) {
+    const keep = new Set(this._windowGopStarts(centerGopStart))
+    for (const gopStart of Array.from(this.decodedGops.keys())) {
+      if (!keep.has(gopStart)) this._evictGop(gopStart)
+    }
+  }
+
+  // Kicks off decoding whichever GOPs around centerGopStart aren't already
+  // decoded or in flight, without waiting for them - by the time a
+  // following getFrameAtOrBefore call actually needs one of these, it's
+  // hopefully already sitting in the cache instead of triggering a fresh
+  // decode-and-wait. Failures here are swallowed (logged) rather than
+  // thrown, since nothing is actually waiting on a prefetch to succeed.
+  _prefetchAround(centerGopStart) {
+    for (const gopStart of this._windowGopStarts(centerGopStart)) {
+      if (gopStart === centerGopStart) continue
+      this._ensureGopDecoded(gopStart).catch((err) => {
+        console.warn('VideoFrameCache: background prefetch failed', err)
+      })
+    }
   }
 
   // Returns the decoded VideoFrame at or immediately before targetTimeSeconds,
@@ -189,20 +294,23 @@ export class VideoFrameCache {
     const targetUs = Math.max(0, Math.round(targetTimeSeconds * 1e6))
     // Which GOP targetUs actually falls in must be checked before trusting
     // the cache: a cached frame can have a timestamp <= targetUs just
-    // because it's left over from a GOP decoded earlier in the scrub (e.g.
-    // scrubbing backward through GOP A, then jumping forward past GOP B
-    // into GOP C - A's frames are still cached and older than the target,
-    // but they're the wrong GOP's frames, not simply stale-but-close).
+    // because it's left over from a neighboring GOP kept around by the
+    // prefetch window, not because it's actually the nearest one.
     const gopStartIndex = this._findGopStartIndex(targetUs)
-    if (gopStartIndex !== this.currentGopStart) {
-      await this._decodeGop(gopStartIndex)
-    }
+    this.currentGopStart = gopStartIndex
+
+    await this._ensureGopDecoded(gopStartIndex)
+    this._evictOutsideWindow(gopStartIndex)
+    this._prefetchAround(gopStartIndex)
+
     return this._bestCachedFrame(targetUs) ?? this._earliestCachedFrame()
   }
 
   close() {
     for (const frame of this.frames.values()) frame.close()
     this.frames.clear()
+    this.decodedGops.clear()
+    this.pendingGops.clear()
     if (this.decoder && this.decoder.state !== 'closed') this.decoder.close()
   }
 }

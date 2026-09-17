@@ -35,12 +35,13 @@ buffer of `VideoFrame`s, then:
 - Player deck and recorder/timeline deck both move from `<video>` to
   `<canvas>` for the display surface.
 - New frame-cache/GOP-buffer layer to manage decode-ahead and eviction.
-- Audio sync needs its own path — canvas only carries video, so audio
-  playback (currently implicit via the `<video>` element) would need a
-  separate `<audio>`/Web Audio element kept in sync with the frame cache.
-  Scrub/rewind already plays silently today (frame-stepping via
-  `currentTime` with `playbackRate` effectively 0 doesn't emit audio), so
-  this only needs solving for normal forward playback, not rewind itself.
+- ~~Audio sync needs its own path~~ - turned out not to, for forward
+  playback specifically: see the PLAY/FF bullet below. `<video>` keeps
+  playing (and producing audio) exactly as before, just hidden underneath
+  the canvas, so its audio was never actually at risk of going out of sync
+  with anything - this line originally assumed forward playback would have
+  to leave `<video>` behind entirely the way REW does, which wasn't
+  necessary once REW's own canvas-overlay trick was in hand.
 - Fallback path needed for browsers without WebCodecs support — likely the
   current `<video>` seek-stepping implementation, kept as the degraded mode.
 
@@ -48,8 +49,7 @@ buffer of `VideoFrame`s, then:
 architecture change, not a bugfix — closer to a multi-day rewrite of both
 decks than the interval/seek tweaks in `TECHDEBT.md`. The first slice below
 was worth doing on its own because it directly fixes the REW-slower-than-FF
-problem without touching the recorder/timeline deck or forward
-playback/audio at all.
+problem without touching the recorder/timeline deck at all.
 
 **Status:** first slice shipped, rest still proposed.
 
@@ -73,10 +73,33 @@ playback/audio at all.
   automatically (`startReseekRewind()` in `ClassicPlayerDeck.jsx`, unchanged
   from before this slice). FF still plays through `<video>` unchanged - only
   REW moved off it, and only on the player/source deck.
-- **Still proposed:** everything else in "Scope / what changes" above - the
-  recorder/timeline deck's `skip()` REW, forward playback moving off
-  `<video>` (which is what would need the audio-sync work), and dropping the
-  `<video>` fallback path entirely.
+- **Shipped (on `claude/play-ff-decouple`, not yet merged):** PLAY and FF
+  also draw from the frame cache now, via `startForwardCanvas()` in
+  `ClassicPlayerDeck.jsx` - `<video>` keeps playing normally underneath
+  (unchanged `play()`/`playbackRate` calls, still what produces audio and
+  drives timing) but its own decoded frames are no longer what's on screen.
+  `requestVideoFrameCallback`'s `metadata.mediaTime` - the exact
+  presentation time `<video>` just reached - is fed to
+  `cache.getFrameAtOrBefore()` to pick the matching frame, which is what
+  keeps this in sync with `<video>`'s own audio without any separate
+  audio/timing engine. JOG was also moved onto the cache
+  (`ClassicPlayerDeck.jsx`'s `jog()`), showing the decoded frame instantly
+  via canvas while `<video>`'s own (slower) seek catches up underneath,
+  handing back to `<video>` once it does - guarded by a
+  `transportGeneration` counter so a jog's async cleanup can't fire late and
+  hide the canvas out from under a REW/PLAY/FF that started in the meantime.
+  `VideoFrameCache` itself grew a small prefetch window
+  (`WINDOW_RADIUS_GOPS` in `videoFrameCache.js`): every
+  `getFrameAtOrBefore()` call now also kicks off (without waiting)
+  background decoding of the neighboring GOPs on each side, sharing the
+  cache's single `VideoDecoder` via a serialized job queue, so a REW/jog
+  step that crosses into an already-prefetched neighbor is a cache hit
+  instead of a fresh decode-and-wait - this is what the "known rough edge"
+  noted in the PLAY/FF decoupling commit (a stall at each GOP boundary
+  during continuous forward playback) actually needed, not something
+  separate.
+- **Still proposed:** the recorder/timeline deck's `skip()` REW, and
+  dropping the `<video>` fallback path entirely.
 
 ## Load video from a hosted platform (Vimeo)
 

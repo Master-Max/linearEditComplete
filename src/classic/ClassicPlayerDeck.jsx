@@ -63,6 +63,13 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip }
   const frameCacheRef = useRef(null)
   const scrubTimeRef = useRef(0)
   const lastDrawnTimeRef = useRef(0)
+  // Bumped at the start of every transport action (play/still/fastForward/
+  // rewind/jog). jog()'s async cleanup (see below) captures this value and
+  // checks it's still current before touching isCanvasActive, so a jog
+  // whose <video> catch-up 'seeked' event fires late - after some other
+  // transport action has already taken over - can't clobber that later
+  // action's canvas state.
+  const transportGeneration = useRef(0)
   const [isCanvasActive, setIsCanvasActive] = useState(false)
 
   // Demux+decode the source with WebCodecs (see src/lib/videoFrameCache.js)
@@ -225,6 +232,7 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip }
   }
 
   function play() {
+    transportGeneration.current++
     clearInterval(rewindTimer.current)
     stopCanvasRewind()
     stopForwardCanvas()
@@ -241,6 +249,7 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip }
   }
 
   function still() {
+    transportGeneration.current++
     clearInterval(rewindTimer.current)
     stopCanvasRewind()
     stopForwardCanvas()
@@ -248,6 +257,7 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip }
   }
 
   function fastForward() {
+    transportGeneration.current++
     clearInterval(rewindTimer.current)
     stopCanvasRewind()
     stopForwardCanvas()
@@ -349,6 +359,7 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip }
   }
 
   function rewind() {
+    transportGeneration.current++
     clearInterval(rewindTimer.current)
     stopCanvasRewind()
     stopForwardCanvas()
@@ -364,11 +375,59 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip }
     }
   }
 
-  function jog(step) {
-    still()
+  // Single-frame nudge. Reads from the WebCodecs frame cache (same one REW
+  // and forward playback use) rather than reseeking <video> directly, so a
+  // jog into an already-prefetched neighboring GOP (see WINDOW_RADIUS_GOPS
+  // in videoFrameCache.js) draws instantly instead of paying <video>'s own
+  // seek latency - which matters most when jogging repeatedly, since each
+  // press would otherwise be an independent reseek.
+  async function jog(step) {
+    still() // bumps transportGeneration, stops any active REW/forward loop
+    const myGeneration = transportGeneration.current
     const v = videoRef.current
     if (!v) return
-    v.currentTime = Math.max(0, Math.min(v.duration || Infinity, v.currentTime + step))
+    const target = Math.max(0, Math.min(v.duration || Infinity, v.currentTime + step))
+
+    const cache = frameCacheRef.current
+    if (!cache) {
+      v.currentTime = target
+      return
+    }
+
+    try {
+      const frame = await cache.getFrameAtOrBefore(target)
+      if (transportGeneration.current !== myGeneration) return // superseded mid-decode
+      if (!frame) {
+        v.currentTime = target
+        return
+      }
+      const canvas = canvasRef.current
+      const ctx = canvas?.getContext('2d')
+      if (canvas && ctx) {
+        if (canvas.width !== frame.displayWidth) canvas.width = frame.displayWidth
+        if (canvas.height !== frame.displayHeight) canvas.height = frame.displayHeight
+        ctx.drawImage(frame, 0, 0)
+        setIsCanvasActive(true)
+      }
+      const shownTime = frame.timestamp / 1e6
+      lastDrawnTimeRef.current = shownTime
+      marks.setCurrentTime(shownTime)
+      v.currentTime = shownTime
+      // The canvas draw above is instant; <video>'s own seek to the same
+      // position is not. Once it catches up, hand back to showing <video>
+      // directly rather than leaving the canvas up indefinitely - but only
+      // if nothing else (another jog, PLAY, FF, REW) has taken over since.
+      v.addEventListener(
+        'seeked',
+        () => {
+          if (transportGeneration.current === myGeneration) setIsCanvasActive(false)
+        },
+        { once: true },
+      )
+    } catch (err) {
+      console.warn('Frame cache decode failed for jog, reseeking directly', err)
+      if (transportGeneration.current === myGeneration) v.currentTime = target
+    }
   }
 
   function addToTimeline() {
