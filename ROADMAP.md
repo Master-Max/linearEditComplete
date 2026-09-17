@@ -44,11 +44,36 @@ buffer of `VideoFrame`s, then:
 - Fallback path needed for browsers without WebCodecs support — likely the
   current `<video>` seek-stepping implementation, kept as the degraded mode.
 
-**Why not now:** this is an architecture change, not a bugfix — closer to a
-multi-day rewrite of both decks than the interval/seek tweaks in
-`TECHDEBT.md`. Worth doing if scrub/rewind responsiveness becomes a real
-product priority; overkill if the all-intra proxy or seeked-event-driven
-stepping fix is enough.
+**Why not now (for the rest of the scope below):** the full version is an
+architecture change, not a bugfix — closer to a multi-day rewrite of both
+decks than the interval/seek tweaks in `TECHDEBT.md`. The first slice below
+was worth doing on its own because it directly fixes the REW-slower-than-FF
+problem without touching the recorder/timeline deck or forward
+playback/audio at all.
 
-**Status:** proposed, not started. Revisit after the two `TECHDEBT.md`
-rewind items are triaged.
+**Status:** first slice shipped, rest still proposed.
+
+- **Shipped:** `src/lib/videoFrameCache.js` demuxes the source file with
+  `mp4box.js` and decodes with `VideoDecoder` into a small per-GOP cache of
+  `VideoFrame`s (binary-searches the keyframe table for the GOP containing a
+  requested time, decodes+caches that whole GOP, evicts the previous one).
+  `ClassicPlayerDeck.jsx`'s `rewind()` uses it to walk backward through
+  already-decoded frames and draw them to a `<canvas>` overlaid on the
+  `<video>` element (see `.player-frame` in `classic.css`), stepping by
+  actual elapsed wall-clock time rather than a fixed tick — which also
+  happens to fix the timing-drift half of "Player deck REW runs slower than
+  FF" in `TECHDEBT.md`, not just the seek-cost half. `usePlayerMarks.js`'s
+  markIn/markOut were changed to read the tracked `currentTime` state
+  instead of `videoRef.current.currentTime` directly, since the `<video>`
+  element sits paused and stale during a canvas scrub.
+  Scope of this slice: MP4/MOV containers with an H.264/HEVC track only
+  (mp4box.js is ISO-BMFF-only; WebM/VP9/AV1 sources aren't demuxed). Any
+  init failure - unsupported browser, unsupported container, unsupported
+  codec - falls back to the original `<video>` seek-stepping REW
+  automatically (`startReseekRewind()` in `ClassicPlayerDeck.jsx`, unchanged
+  from before this slice). FF still plays through `<video>` unchanged - only
+  REW moved off it, and only on the player/source deck.
+- **Still proposed:** everything else in "Scope / what changes" above - the
+  recorder/timeline deck's `skip()` REW, forward playback moving off
+  `<video>` (which is what would need the audio-sync work), and dropping the
+  `<video>` fallback path entirely.

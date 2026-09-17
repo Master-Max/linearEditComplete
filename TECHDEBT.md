@@ -72,6 +72,15 @@ rather than assuming every tick represents 20ms. That makes the rate
 self-correct to whatever the browser can actually deliver instead of
 losing time to skipped ticks.
 
-**Status:** deferred. Not urgent — the recorder/timeline deck's REW is a
-discrete `skip(-3)` and unaffected; this is scoped to the player/source
-deck's continuous JKL-style scrub.
+**Status:** fixed for the common case, this exact code path kept as the
+fallback. The "WebCodecs-based scrub/rewind" entry in `ROADMAP.md` shipped
+a first slice: when the source's container/codec support it,
+`rewind()` now walks a decoded-frame cache (`src/lib/videoFrameCache.js`)
+instead of reseeking `<video>` at all, which removes the seek cost this
+entry is about entirely (not just the timing drift - the wall-clock-based
+stepping fix proposed above went into that new path too, since it was
+already being rewritten). This exact `setInterval`/`v.seeking` code stays
+untouched as `startReseekRewind()`, used when the frame cache can't be
+built (unsupported browser, non-MP4/MOV source, unsupported codec) - for
+that fallback case, the problem described above still applies as written
+and the proposed fix above is still unapplied to it.

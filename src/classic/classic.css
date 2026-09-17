@@ -33,6 +33,27 @@
   height: 270px;
 }
 
+/* Wraps the player deck's <video> so a same-sized <canvas> can be laid
+   exactly on top of it during a WebCodecs frame-cache scrub (see
+   ClassicPlayerDeck.jsx's rewind()/startCanvasRewind()). */
+.classic-editor .player-frame {
+  position: relative;
+  display: inline-block;
+}
+
+.classic-editor .player-frame canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  margin: 8px;
+  padding-left: 12px;
+  padding-right: 12px;
+  width: 480px;
+  height: 270px;
+  background-color: #000000;
+  pointer-events: none;
+}
+
 .classic-editor #controls {
   display: flex;
   justify-content: center;

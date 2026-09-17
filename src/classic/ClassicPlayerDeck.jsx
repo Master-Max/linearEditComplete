@@ -1,6 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
 import { usePlayerMarks } from '../hooks/usePlayerMarks'
 import { formatTimecode } from './formatTimecode'
+import { VideoFrameCache, isFrameCacheSupported } from '../lib/videoFrameCache'
+
+// Nominal REW rate, matching FF's native 4x playbackRate.
+const REWIND_RATE = 4
 
 // Maps each shortcut key to the switch it should visually "press" while
 // held, so keyboard use gets the same :active feedback as a mouse click.
@@ -30,8 +34,47 @@ const ACTION_KEY_LABELS = {
 
 export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip }) {
   const videoRef = useRef(null)
+  const canvasRef = useRef(null)
   const marks = usePlayerMarks(videoRef, source)
   const rewindTimer = useRef(null)
+  const rewindRaf = useRef(null)
+  const frameCacheRef = useRef(null)
+  const scrubTimeRef = useRef(0)
+  const [isCanvasScrubActive, setIsCanvasScrubActive] = useState(false)
+
+  // Demux+decode the source with WebCodecs (see src/lib/videoFrameCache.js)
+  // as soon as it loads, so rewind() has a ready frame cache to scrub
+  // through instead of reseeking the <video> element. Anything that fails
+  // here (unsupported browser, non-MP4/MOV container, unsupported codec)
+  // just leaves frameCacheRef.current null, and rewind() falls back to the
+  // original currentTime-stepping approach.
+  useEffect(() => {
+    let cancelled = false
+    frameCacheRef.current?.close()
+    frameCacheRef.current = null
+
+    if (source?.file && isFrameCacheSupported()) {
+      const cache = new VideoFrameCache(source.file)
+      cache
+        .init()
+        .then(() => {
+          if (cancelled) {
+            cache.close()
+            return
+          }
+          frameCacheRef.current = cache
+        })
+        .catch((err) => {
+          console.warn('WebCodecs frame cache unavailable, REW will reseek instead', err)
+        })
+    }
+
+    return () => {
+      cancelled = true
+      frameCacheRef.current?.close()
+      frameCacheRef.current = null
+    }
+  }, [source?.id, source?.file])
 
   // markIn/markOut close over inPoint/outPoint state, so the keydown
   // listener below (mounted once) reads them through a ref that's kept
@@ -53,10 +96,31 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip }
     return <span className="key-hint">{ACTION_KEY_LABELS[action]}</span>
   }
 
-  useEffect(() => () => clearInterval(rewindTimer.current), [])
+  useEffect(
+    () => () => {
+      clearInterval(rewindTimer.current)
+      cancelAnimationFrame(rewindRaf.current)
+    },
+    [],
+  )
+
+  // Ends a canvas-driven scrub in progress (if any), syncing the <video>
+  // element to wherever the scrub left off before handing control back to
+  // it. Called at the top of every other transport action so switching
+  // straight from REW to PLAY/FF/STILL/JOG doesn't leave the canvas
+  // showing a stale frame.
+  function stopCanvasRewind() {
+    if (rewindRaf.current == null) return
+    cancelAnimationFrame(rewindRaf.current)
+    rewindRaf.current = null
+    setIsCanvasScrubActive(false)
+    const v = videoRef.current
+    if (v) v.currentTime = scrubTimeRef.current
+  }
 
   function play() {
     clearInterval(rewindTimer.current)
+    stopCanvasRewind()
     const v = videoRef.current
     if (!v) return
     v.playbackRate = 1
@@ -69,19 +133,76 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip }
 
   function still() {
     clearInterval(rewindTimer.current)
+    stopCanvasRewind()
     videoRef.current?.pause()
   }
 
   function fastForward() {
     clearInterval(rewindTimer.current)
+    stopCanvasRewind()
     const v = videoRef.current
     if (!v) return
     v.playbackRate = 4
     v.play().catch(() => {})
   }
 
-  function rewind() {
-    clearInterval(rewindTimer.current)
+  // Walks the WebCodecs frame cache backward, drawing each frame to the
+  // overlay canvas instead of touching video.currentTime - see
+  // src/lib/videoFrameCache.js and the "Player deck REW runs slower than
+  // FF" entry in TECHDEBT.md for why avoiding <video> seeks is the point.
+  // Steps by actual elapsed wall-clock time (rather than assuming a fixed
+  // tick length) so the rate holds even if a frame decode takes a tick or
+  // two longer than usual.
+  function startCanvasRewind(cache, startTime) {
+    const canvas = canvasRef.current
+    const ctx = canvas?.getContext('2d')
+    scrubTimeRef.current = startTime
+    setIsCanvasScrubActive(true)
+    let lastTs = performance.now()
+    let stopped = false
+
+    async function step(now) {
+      if (stopped) return
+      const elapsed = (now - lastTs) / 1000
+      lastTs = now
+      const time = Math.max(0, scrubTimeRef.current - elapsed * REWIND_RATE)
+      scrubTimeRef.current = time
+
+      try {
+        const frame = await cache.getFrameAtOrBefore(time)
+        if (stopped) return
+        if (frame && ctx) {
+          if (canvas.width !== frame.displayWidth) canvas.width = frame.displayWidth
+          if (canvas.height !== frame.displayHeight) canvas.height = frame.displayHeight
+          ctx.drawImage(frame, 0, 0)
+        }
+      } catch (err) {
+        // Decode failed mid-scrub (corrupt sample, decoder hiccup) - fall
+        // back to the reseek-based loop from wherever we got to rather than
+        // freezing on a dead scrub.
+        console.warn('Frame cache decode failed mid-scrub, falling back to reseeking', err)
+        stopped = true
+        stopCanvasRewind()
+        startReseekRewind()
+        return
+      }
+
+      marks.setCurrentTime(time)
+      if (time <= 0) {
+        stopped = true
+        stopCanvasRewind()
+        return
+      }
+      rewindRaf.current = requestAnimationFrame(step)
+    }
+
+    rewindRaf.current = requestAnimationFrame(step)
+  }
+
+  // Original REW implementation, kept as the fallback for browsers/sources
+  // the WebCodecs frame cache can't handle (see isFrameCacheSupported() and
+  // VideoFrameCache.init() in src/lib/videoFrameCache.js).
+  function startReseekRewind() {
     const v = videoRef.current
     if (!v) return
     v.pause()
@@ -98,6 +219,21 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip }
       v.currentTime = Math.max(0, v.currentTime - 0.08)
       if (v.currentTime <= 0) clearInterval(rewindTimer.current)
     }, 20)
+  }
+
+  function rewind() {
+    clearInterval(rewindTimer.current)
+    stopCanvasRewind()
+    const v = videoRef.current
+    if (!v) return
+    v.pause()
+
+    const cache = frameCacheRef.current
+    if (cache) {
+      startCanvasRewind(cache, v.currentTime)
+    } else {
+      startReseekRewind()
+    }
   }
 
   function jog(step) {
@@ -214,14 +350,20 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip }
       </div>
       <div className="clock">{formatTimecode(marks.currentTime)}</div>
 
-      {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
-      <video
-        key={source?.id ?? 'empty'}
-        ref={videoRef}
-        src={source?.url}
-        onLoadedMetadata={marks.resetMarks}
-        onTimeUpdate={(e) => marks.setCurrentTime(e.currentTarget.currentTime)}
-      />
+      <div className="player-frame">
+        {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
+        <video
+          key={source?.id ?? 'empty'}
+          ref={videoRef}
+          src={source?.url}
+          onLoadedMetadata={marks.resetMarks}
+          onTimeUpdate={(e) => marks.setCurrentTime(e.currentTarget.currentTime)}
+        />
+        {/* Shown only during a WebCodecs-driven REW (see startCanvasRewind
+            above) - draws decoded frames directly instead of reseeking the
+            <video> element underneath, which stays paused and hidden. */}
+        <canvas ref={canvasRef} style={{ display: isCanvasScrubActive ? 'block' : 'none' }} />
+      </div>
 
       <div className="load-eject-row">
         <button

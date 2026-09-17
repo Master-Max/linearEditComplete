@@ -12,14 +12,18 @@ export function usePlayerMarks(videoRef, source) {
     setOutPoint(source?.duration ?? 0)
   }
 
+  // markIn/markOut read the tracked `currentTime` state rather than
+  // videoRef.current.currentTime directly - during a WebCodecs frame-cache
+  // scrub (see ClassicPlayerDeck's rewind()) the <video> element itself sits
+  // paused and stale while a canvas shows the actual scrub position, so
+  // videoRef.current.currentTime would be wrong mid-scrub. `currentTime` is
+  // kept live by both the video's own timeupdate handler and the scrub loop.
   function markIn() {
-    const t = videoRef.current?.currentTime ?? 0
-    setInPoint(Math.min(t, outPoint))
+    setInPoint(Math.min(currentTime, outPoint))
   }
 
   function markOut() {
-    const t = videoRef.current?.currentTime ?? 0
-    setOutPoint(Math.max(t, inPoint))
+    setOutPoint(Math.max(currentTime, inPoint))
   }
 
   function goToIn() {
