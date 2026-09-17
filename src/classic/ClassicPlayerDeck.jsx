@@ -6,6 +6,27 @@ import { VideoFrameCache, isFrameCacheSupported } from '../lib/videoFrameCache'
 // Nominal REW rate, matching FF's native 4x playbackRate.
 const REWIND_RATE = 4
 
+// Paints whatever <video> currently has decoded onto the canvas, best-
+// effort - used to avoid a flash of the canvas's own black background at
+// the instant it's swapped in for REW or forward playback. video.videoWidth
+// is set as soon as metadata loads, well before any frame is actually
+// decoded, so readyState also has to clear HAVE_CURRENT_DATA or drawImage
+// throws InvalidStateError; wrapped in try/catch too since that guard is
+// necessarily racy against a video that's mid-seek (e.g. currentTime was
+// just set moments earlier) - either way, a missed pre-draw here just means
+// the first real decoded frame is what appears a tick later, not a crash
+// that silently skips the v.play() call after it.
+function paintCurrentVideoFrame(video, canvas, ctx) {
+  if (!video || !canvas || !ctx || !video.videoWidth || video.readyState < video.HAVE_CURRENT_DATA) return
+  try {
+    canvas.width = video.videoWidth
+    canvas.height = video.videoHeight
+    ctx.drawImage(video, 0, 0)
+  } catch {
+    // Best-effort - see comment above.
+  }
+}
+
 // Maps each shortcut key to the switch it should visually "press" while
 // held, so keyboard use gets the same :active feedback as a mouse click.
 const KEY_ACTIONS = {
@@ -38,17 +59,19 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip }
   const marks = usePlayerMarks(videoRef, source)
   const rewindTimer = useRef(null)
   const rewindRaf = useRef(null)
+  const forwardRvfc = useRef(null)
   const frameCacheRef = useRef(null)
   const scrubTimeRef = useRef(0)
   const lastDrawnTimeRef = useRef(0)
-  const [isCanvasScrubActive, setIsCanvasScrubActive] = useState(false)
+  const [isCanvasActive, setIsCanvasActive] = useState(false)
 
   // Demux+decode the source with WebCodecs (see src/lib/videoFrameCache.js)
-  // as soon as it loads, so rewind() has a ready frame cache to scrub
-  // through instead of reseeking the <video> element. Anything that fails
-  // here (unsupported browser, non-MP4/MOV container, unsupported codec)
-  // just leaves frameCacheRef.current null, and rewind() falls back to the
-  // original currentTime-stepping approach.
+  // as soon as it loads, so rewind()/play()/fastForward() have a ready
+  // frame cache to render from instead of the <video> element's own
+  // decode. Anything that fails here (unsupported browser, non-MP4/MOV
+  // container, unsupported codec) just leaves frameCacheRef.current null,
+  // and every transport falls back to driving <video> directly, as before
+  // this cache existed.
   useEffect(() => {
     let cancelled = false
     frameCacheRef.current?.close()
@@ -101,6 +124,7 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip }
     () => () => {
       clearInterval(rewindTimer.current)
       cancelAnimationFrame(rewindRaf.current)
+      if (forwardRvfc.current != null) videoRef.current?.cancelVideoFrameCallback?.(forwardRvfc.current)
     },
     [],
   )
@@ -117,17 +141,98 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip }
     if (rewindRaf.current == null) return
     cancelAnimationFrame(rewindRaf.current)
     rewindRaf.current = null
-    setIsCanvasScrubActive(false)
+    setIsCanvasActive(false)
     const v = videoRef.current
     if (v) v.currentTime = lastDrawnTimeRef.current
+  }
+
+  // Ends the forward-playback render loop (see startForwardCanvas) started
+  // by play()/fastForward(). No need to touch video.currentTime here the
+  // way stopCanvasRewind does - <video> was never paused or frozen while
+  // canvas was drawing over it, it was actively playing the whole time, so
+  // whatever it's showing once we stop covering it is already correct.
+  function stopForwardCanvas() {
+    if (forwardRvfc.current == null) return
+    videoRef.current?.cancelVideoFrameCallback?.(forwardRvfc.current)
+    forwardRvfc.current = null
+    setIsCanvasActive(false)
+  }
+
+  // Drives the overlay canvas from the WebCodecs frame cache during normal
+  // forward playback (PLAY/FF), instead of letting <video>'s own decoded
+  // frames be what's on screen - see the "WebCodecs-based scrub/rewind"
+  // entry in ROADMAP.md. <video> keeps playing completely normally
+  // underneath (same play()/playbackRate calls as always) and is still
+  // what actually produces audio and drives the playback clock; only the
+  // pixels shown come from our own decode instead of the browser's. Reading
+  // metadata.mediaTime from requestVideoFrameCallback - the exact
+  // presentation time of the frame <video> itself just displayed - is what
+  // keeps the two in lockstep without needing any separate audio/timing
+  // engine: video's own audio is already synced to that timeline, we're
+  // just asking "what should be on screen at the instant video reached
+  // this point" and drawing our own answer over it.
+  //
+  // Known rough edge: getFrameAtOrBefore decodes a whole GOP synchronously
+  // the first time playback crosses into one it hasn't cached yet (see
+  // VideoFrameCache._decodeGop), so there's a real chance of a brief stall
+  // right at each GOP boundary rather than a perfectly smooth scan through
+  // long forward playback - worth specifically watching for during testing,
+  // especially at FF's 4x rate where boundaries come up more often per
+  // second of wall-clock time. A prefetch-the-next-GOP-ahead-of-time step
+  // would be the fix if that shows up as a real problem.
+  function startForwardCanvas(cache) {
+    const video = videoRef.current
+    const canvas = canvasRef.current
+    const ctx = canvas?.getContext('2d')
+    if (!video || !canvas || !ctx || typeof video.requestVideoFrameCallback !== 'function') return
+
+    // Paint the frame <video> is already showing before swapping the canvas
+    // in, same as startCanvasRewind - no flash of the canvas's black
+    // background while the cache decodes the first frame.
+    paintCurrentVideoFrame(video, canvas, ctx)
+    setIsCanvasActive(true)
+
+    async function onFrame(now, metadata) {
+      try {
+        const frame = await cache.getFrameAtOrBefore(metadata.mediaTime)
+        if (forwardRvfc.current == null) return // stopped while awaiting decode
+        if (frame) {
+          if (canvas.width !== frame.displayWidth) canvas.width = frame.displayWidth
+          if (canvas.height !== frame.displayHeight) canvas.height = frame.displayHeight
+          ctx.drawImage(frame, 0, 0)
+          marks.setCurrentTime(frame.timestamp / 1e6)
+        }
+      } catch (err) {
+        // Decode failed mid-playback - drop back to <video>'s own rendering
+        // rather than freezing on a dead canvas. <video> itself was never
+        // touched, so it's already showing the right thing.
+        console.warn('Frame cache decode failed during playback, showing <video> directly', err)
+        stopForwardCanvas()
+        return
+      }
+
+      if (!video.paused && !video.ended) {
+        forwardRvfc.current = video.requestVideoFrameCallback(onFrame)
+      } else {
+        // Playback stopped on its own (FF/PLAY ran off the end) rather than
+        // via still()/rewind() - nothing left to render, hand back to
+        // <video>'s own display of its final frame.
+        stopForwardCanvas()
+      }
+    }
+
+    forwardRvfc.current = video.requestVideoFrameCallback(onFrame)
   }
 
   function play() {
     clearInterval(rewindTimer.current)
     stopCanvasRewind()
+    stopForwardCanvas()
     const v = videoRef.current
     if (!v) return
     v.playbackRate = 1
+    const cache = frameCacheRef.current
+    if (cache) startForwardCanvas(cache)
     // play() returns a promise that rejects with AbortError if the play
     // request gets interrupted (e.g. a pause()/another play() call lands
     // before it resolves - REW does exactly that). Expected and harmless,
@@ -138,15 +243,19 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip }
   function still() {
     clearInterval(rewindTimer.current)
     stopCanvasRewind()
+    stopForwardCanvas()
     videoRef.current?.pause()
   }
 
   function fastForward() {
     clearInterval(rewindTimer.current)
     stopCanvasRewind()
+    stopForwardCanvas()
     const v = videoRef.current
     if (!v) return
     v.playbackRate = 4
+    const cache = frameCacheRef.current
+    if (cache) startForwardCanvas(cache)
     v.play().catch(() => {})
   }
 
@@ -167,13 +276,9 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip }
     // at startTime by rewind()) before swapping the canvas in, so there's
     // no flash of the canvas's own black background while the first cache
     // decode is still in flight.
-    if (canvas && ctx && video && video.videoWidth) {
-      canvas.width = video.videoWidth
-      canvas.height = video.videoHeight
-      ctx.drawImage(video, 0, 0)
-    }
+    paintCurrentVideoFrame(video, canvas, ctx)
     lastDrawnTimeRef.current = startTime
-    setIsCanvasScrubActive(true)
+    setIsCanvasActive(true)
     let lastTs = performance.now()
     let stopped = false
 
@@ -246,6 +351,7 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip }
   function rewind() {
     clearInterval(rewindTimer.current)
     stopCanvasRewind()
+    stopForwardCanvas()
     const v = videoRef.current
     if (!v) return
     v.pause()
@@ -381,10 +487,12 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip }
           onLoadedMetadata={marks.resetMarks}
           onTimeUpdate={(e) => marks.setCurrentTime(e.currentTarget.currentTime)}
         />
-        {/* Shown only during a WebCodecs-driven REW (see startCanvasRewind
-            above) - draws decoded frames directly instead of reseeking the
-            <video> element underneath, which stays paused and hidden. */}
-        <canvas ref={canvasRef} style={{ display: isCanvasScrubActive ? 'block' : 'none' }} />
+        {/* Shown whenever the WebCodecs frame cache is driving the display -
+            REW (startCanvasRewind) or forward playback (startForwardCanvas)
+            - covering the <video> element underneath, which keeps playing/
+            decoding normally (and is what actually produces audio) but
+            isn't what's on screen while this is up. */}
+        <canvas ref={canvasRef} style={{ display: isCanvasActive ? 'block' : 'none' }} />
       </div>
 
       <div className="load-eject-row">
