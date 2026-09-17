@@ -40,6 +40,7 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip }
   const rewindRaf = useRef(null)
   const frameCacheRef = useRef(null)
   const scrubTimeRef = useRef(0)
+  const lastDrawnTimeRef = useRef(0)
   const [isCanvasScrubActive, setIsCanvasScrubActive] = useState(false)
 
   // Demux+decode the source with WebCodecs (see src/lib/videoFrameCache.js)
@@ -108,14 +109,17 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip }
   // element to wherever the scrub left off before handing control back to
   // it. Called at the top of every other transport action so switching
   // straight from REW to PLAY/FF/STILL/JOG doesn't leave the canvas
-  // showing a stale frame.
+  // showing a stale frame. Syncs to lastDrawnTimeRef (the actual frame last
+  // drawn), not scrubTimeRef (the idealized continuous scrub position - see
+  // startCanvasRewind), so the video resumes from exactly what was on
+  // screen rather than a slightly later moment mid-frame.
   function stopCanvasRewind() {
     if (rewindRaf.current == null) return
     cancelAnimationFrame(rewindRaf.current)
     rewindRaf.current = null
     setIsCanvasScrubActive(false)
     const v = videoRef.current
-    if (v) v.currentTime = scrubTimeRef.current
+    if (v) v.currentTime = lastDrawnTimeRef.current
   }
 
   function play() {
@@ -154,9 +158,21 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip }
   // tick length) so the rate holds even if a frame decode takes a tick or
   // two longer than usual.
   function startCanvasRewind(cache, startTime) {
+    const video = videoRef.current
     const canvas = canvasRef.current
     const ctx = canvas?.getContext('2d')
     scrubTimeRef.current = startTime
+
+    // Paint the frame the <video> is already showing (it's already paused
+    // at startTime by rewind()) before swapping the canvas in, so there's
+    // no flash of the canvas's own black background while the first cache
+    // decode is still in flight.
+    if (canvas && ctx && video && video.videoWidth) {
+      canvas.width = video.videoWidth
+      canvas.height = video.videoHeight
+      ctx.drawImage(video, 0, 0)
+    }
+    lastDrawnTimeRef.current = startTime
     setIsCanvasScrubActive(true)
     let lastTs = performance.now()
     let stopped = false
@@ -175,6 +191,12 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip }
           if (canvas.width !== frame.displayWidth) canvas.width = frame.displayWidth
           if (canvas.height !== frame.displayHeight) canvas.height = frame.displayHeight
           ctx.drawImage(frame, 0, 0)
+          // Track the actual frame drawn, not the idealized continuous
+          // `time` above - getFrameAtOrBefore returns the nearest frame AT
+          // OR BEFORE that time, so the two can differ by up to one frame's
+          // duration. The clock (and the eventual <video> sync in
+          // stopCanvasRewind) should reflect what's actually on screen.
+          lastDrawnTimeRef.current = frame.timestamp / 1e6
         }
       } catch (err) {
         // Decode failed mid-scrub (corrupt sample, decoder hiccup) - fall
@@ -187,7 +209,7 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip }
         return
       }
 
-      marks.setCurrentTime(time)
+      marks.setCurrentTime(lastDrawnTimeRef.current)
       if (time <= 0) {
         stopped = true
         stopCanvasRewind()
@@ -390,13 +412,13 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip }
             PLAY
             {keyHint('play')}
           </b>
-          <b onClick={still} className={`switch${keyClass('still')}`}>
-            STILL
-            {keyHint('still')}
-          </b>
           <b onClick={rewind} className={`switch${keyClass('rewind')}`}>
             REW
             {keyHint('rewind')}
+          </b>
+          <b onClick={still} className={`switch${keyClass('still')}`}>
+            STILL
+            {keyHint('still')}
           </b>
           <b onClick={fastForward} className={`switch${keyClass('fastForward')}`}>
             FF
