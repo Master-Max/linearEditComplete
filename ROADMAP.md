@@ -77,3 +77,88 @@ playback/audio at all.
   recorder/timeline deck's `skip()` REW, forward playback moving off
   `<video>` (which is what would need the audio-sync work), and dropping the
   `<video>` fallback path entirely.
+
+## Load video from a hosted platform (Vimeo)
+
+**Where:** `src/components/VideoUpload.jsx`, `src/lib/loadVideoSource.js`,
+`src/classic/ClassicLayout.jsx`'s `handleLoadFiles`
+
+Today every source is a local `File` (drag/drop or the file picker) that
+gets read fully into memory (`loadVideoSource`) and handed around as a blob
+URL + `File` object - that's what every downstream consumer (the `<video>`
+elements, `useFFmpeg.js`'s `writeFile`, `VideoFrameCache`'s
+`file.arrayBuffer()`) actually expects. "Load from Vimeo" means getting a
+Vimeo-hosted video into that same shape; everything past that point already
+works unmodified.
+
+**The blocker:** Vimeo's video CDN sends no CORS headers, so
+`fetch()`/`XMLHttpRequest` for the raw file from browser JS is blocked
+regardless of authentication - confirmed by multiple unrelated projects
+hitting the same wall embedding Vimeo in WebGL/Unity/Flutter. A `<video>`
+tag can still *play* a cross-origin URL without CORS (no canvas/byte access
+needed for that), but this app needs the bytes themselves - to trim/export
+via `ffmpeg.wasm` and to demux for the WebCodecs frame cache - not just
+playback. That rules out any pure-client, no-backend approach for actual
+editing; only a preview-only path (see below) can stay client-only.
+
+**Getting the bytes at all requires Vimeo's API, which requires OAuth:**
+an access token with the `public`, `private`, and `video_files` scopes
+returns a `download`/`file` field per video - itself an expiring (a few
+hours) signed 302 redirect to the actual CDN location, not a stable URL.
+Two hard scope limits come with this, not implementation details to work
+around:
+- It only returns files for videos the authenticated account owns or has
+  library access to. There's no legitimate way to pull an arbitrary public
+  `vimeo.com/12345678` URL someone pastes in - Vimeo's API doesn't expose
+  download links for videos you don't have rights to, on purpose.
+- Reliable non-expiring download access is a Vimeo Pro-and-up feature; free
+  accounts may not have a `download` link to give at all.
+Scraping the player's internal config JSON for the progressive/HLS URLs
+(what unofficial "vimeo downloader" tools do) sidesteps the OAuth scope
+limit, but it's unversioned, breaks whenever Vimeo changes the player
+internals, and does the exact thing the scope restriction above exists to
+prevent for videos you don't own - not something to build this feature on.
+
+**Proposal, in two independent pieces:**
+
+1. **Preview-only, no backend:** use Vimeo's public oEmbed endpoint (no
+   auth) to resolve a pasted URL into a title/thumbnail/embeddable player,
+   and embed the official Player iframe for playback. This never produces
+   editable bytes - the iframe is a fully cross-origin, sandboxed
+   `player.vimeo.com` document, so there's no route from it to a `File` or
+   `ArrayBuffer` at all. Useful only as a "reference clip" panel, not as a
+   timeline source. Cheap to build, but on its own doesn't satisfy "load a
+   Vimeo video into the editor."
+2. **Actually editable, needs a backend:** add Vimeo OAuth (authorization
+   code flow) plus a small server-side proxy that (a) exchanges the auth
+   code for a token - the app's client secret can never live in browser JS,
+   (b) calls the Vimeo API for the authenticated user's own video to get its
+   current download redirect, and (c) streams those bytes back to the
+   browser through the proxy's own origin (which sets its own CORS/no-CORS-
+   needed headers, sidestepping Vimeo's CDN entirely). The browser then
+   treats the proxied response exactly like a dropped file: read it into a
+   `File`/`ArrayBuffer` the same way `loadVideoSource` already does, and the
+   rest of the app - `<video>` playback, `VideoFrameCache`, ffmpeg
+   trim/export - needs no changes at all.
+
+**Why this is a bigger decision than it looks:** this app is currently a
+100% static SPA with no server component (see `DEPLOYMENT.md` - it ships to
+GitHub Pages). Piece 2 requires standing up and hosting *something* with a
+server (a small serverless function is the natural fit - e.g. a Cloudflare
+Worker or Vercel edge function alongside the static site - not a full
+backend rewrite, but a genuinely new kind of infrastructure this project
+doesn't have today), plus registering a Vimeo API app and managing its
+client secret. It also only ever covers the signed-in user's own Vimeo
+library, never arbitrary shared links, which may or may not match what
+"load a video from Vimeo" means to whoever's asking for this. And it's worth
+being explicit that this changes what `VideoUpload.jsx` currently tells
+users ("Files never leave your computer — all editing runs locally in the
+browser.") - a Vimeo-sourced clip's bytes do cross the network (browser to
+proxy to Vimeo's CDN and back) even though nothing about the app's own
+processing changes.
+
+**Status:** proposed, not started. Needs a decision on scope (own-library
+videos only, which is what's actually achievable, vs. what a user might
+expect from "paste a Vimeo link") and on whether adding a serverless
+component is acceptable before piece 2 is worth building; piece 1 could
+ship independently as a lightweight preview feature regardless.
