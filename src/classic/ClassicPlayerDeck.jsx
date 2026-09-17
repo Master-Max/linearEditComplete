@@ -154,9 +154,20 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip }
   // tick length) so the rate holds even if a frame decode takes a tick or
   // two longer than usual.
   function startCanvasRewind(cache, startTime) {
+    const video = videoRef.current
     const canvas = canvasRef.current
     const ctx = canvas?.getContext('2d')
     scrubTimeRef.current = startTime
+
+    // Paint the frame the <video> is already showing (it's already paused
+    // at startTime by rewind()) before swapping the canvas in, so there's
+    // no flash of the canvas's own black background while the first cache
+    // decode is still in flight.
+    if (canvas && ctx && video && video.videoWidth) {
+      canvas.width = video.videoWidth
+      canvas.height = video.videoHeight
+      ctx.drawImage(video, 0, 0)
+    }
     setIsCanvasScrubActive(true)
     let lastTs = performance.now()
     let stopped = false
@@ -390,13 +401,13 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip }
             PLAY
             {keyHint('play')}
           </b>
-          <b onClick={still} className={`switch${keyClass('still')}`}>
-            STILL
-            {keyHint('still')}
-          </b>
           <b onClick={rewind} className={`switch${keyClass('rewind')}`}>
             REW
             {keyHint('rewind')}
+          </b>
+          <b onClick={still} className={`switch${keyClass('still')}`}>
+            STILL
+            {keyHint('still')}
           </b>
           <b onClick={fastForward} className={`switch${keyClass('fastForward')}`}>
             FF
