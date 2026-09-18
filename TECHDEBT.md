@@ -133,6 +133,25 @@ aren't on it.
   walk runs off the front of it, which is a redesign of `_decodeGop` rather
   than a tweak.
 
-**Status:** open. Found by testing against real footage rather than the
-synthetic fixtures used until now; those all had short, evenly spaced GOPs and
-so never exercised this.
+**Status:** open, but no longer able to fail silently. Found by testing against
+real footage rather than the synthetic fixtures used until now; those all had
+short, evenly spaced GOPs and so never exercised this.
+
+Two guards went in after a report of REW and jog dying outright on real
+footage:
+- `PREFETCH_BYTE_BUDGET` caps how much decoded video the prefetch window may
+  hold open, so long GOPs stop multiplying the memory by the window size. The
+  GOP actually being requested is still decoded whole — that part can't be
+  avoided without the redesign above.
+- `DECODE_TIMEOUT_MS` bounds a single GOP decode. This is a deadlock guard,
+  not a latency budget: decode jobs chain through `decodeQueue`, so a decode
+  that never settles is one every later decode waits on forever, and because
+  the background prefetch enqueues jobs nobody awaits, a stall there surfaces
+  only as the next REW or jog hanging with no error to catch. Holding hundreds
+  of decoded frames open can starve a hardware decoder's buffer pool, and a
+  decoder starved that way stops producing rather than failing — exactly that
+  shape. Timing out converts it into a rejection, which falls back to
+  `<video>` reseeking.
+
+Neither guard removes the underlying cost; they stop it from presenting as a
+frozen deck.
