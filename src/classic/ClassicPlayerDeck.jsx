@@ -198,24 +198,36 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip }
     // background while the cache decodes the first frame.
     paintCurrentVideoFrame(video, canvas, ctx)
     setIsCanvasActive(true)
+    // See the matching comment in startCanvasRewind for why this is a
+    // shared, always-current counter rather than a check against
+    // forwardRvfc.current alone: that ref being reassigned (a newer
+    // startForwardCanvas/startCanvasRewind call replacing it) reads as
+    // "still active" just as easily as it being null does, so an in-flight
+    // onFrame call from a superseded session could still pass that check
+    // and end up racing the new session's own callback.
+    const myGeneration = transportGeneration.current
 
     async function onFrame(now, metadata) {
+      if (transportGeneration.current !== myGeneration) return
+      let frame
       try {
-        const frame = await cache.getFrameAtOrBefore(metadata.mediaTime)
-        if (forwardRvfc.current == null) return // stopped while awaiting decode
-        if (frame) {
-          if (canvas.width !== frame.displayWidth) canvas.width = frame.displayWidth
-          if (canvas.height !== frame.displayHeight) canvas.height = frame.displayHeight
-          ctx.drawImage(frame, 0, 0)
-          marks.setCurrentTime(frame.timestamp / 1e6)
-        }
+        frame = await cache.getFrameAtOrBefore(metadata.mediaTime)
       } catch (err) {
+        if (transportGeneration.current !== myGeneration) return // superseded while decoding
         // Decode failed mid-playback - drop back to <video>'s own rendering
         // rather than freezing on a dead canvas. <video> itself was never
         // touched, so it's already showing the right thing.
         console.warn('Frame cache decode failed during playback, showing <video> directly', err)
         stopForwardCanvas()
         return
+      }
+      if (transportGeneration.current !== myGeneration) return // superseded while decoding
+
+      if (frame) {
+        if (canvas.width !== frame.displayWidth) canvas.width = frame.displayWidth
+        if (canvas.height !== frame.displayHeight) canvas.height = frame.displayHeight
+        ctx.drawImage(frame, 0, 0)
+        marks.setCurrentTime(frame.timestamp / 1e6)
       }
 
       if (!video.paused && !video.ended) {
@@ -290,43 +302,56 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip }
     lastDrawnTimeRef.current = startTime
     setIsCanvasActive(true)
     let lastTs = performance.now()
-    let stopped = false
+    // Captured now, checked after every await below - NOT a local `stopped`
+    // flag, because stopCanvasRewind() (called from play()/still()/etc, all
+    // of which bump transportGeneration first) can only cancel the *next*
+    // scheduled tick. It can't reach into a step() call that's already
+    // mid-await on a frame decode, so a purely local flag never gets set in
+    // time: that in-flight call finishes unaware anything changed and
+    // reschedules itself via requestAnimationFrame(step), leaving REW
+    // silently still running - and eventually calling stopCanvasRewind()
+    // itself once its own countdown reaches 0, yanking video.currentTime
+    // backward - well after PLAY/FF/STILL/another REW has taken over. This
+    // is the "rewind still happening after pressing play" bug: checking the
+    // shared, always-current counter instead catches that case.
+    const myGeneration = transportGeneration.current
 
     async function step(now) {
-      if (stopped) return
+      if (transportGeneration.current !== myGeneration) return
       const elapsed = (now - lastTs) / 1000
       lastTs = now
       const time = Math.max(0, scrubTimeRef.current - elapsed * REWIND_RATE)
       scrubTimeRef.current = time
 
+      let frame
       try {
-        const frame = await cache.getFrameAtOrBefore(time)
-        if (stopped) return
-        if (frame && ctx) {
-          if (canvas.width !== frame.displayWidth) canvas.width = frame.displayWidth
-          if (canvas.height !== frame.displayHeight) canvas.height = frame.displayHeight
-          ctx.drawImage(frame, 0, 0)
-          // Track the actual frame drawn, not the idealized continuous
-          // `time` above - getFrameAtOrBefore returns the nearest frame AT
-          // OR BEFORE that time, so the two can differ by up to one frame's
-          // duration. The clock (and the eventual <video> sync in
-          // stopCanvasRewind) should reflect what's actually on screen.
-          lastDrawnTimeRef.current = frame.timestamp / 1e6
-        }
+        frame = await cache.getFrameAtOrBefore(time)
       } catch (err) {
+        if (transportGeneration.current !== myGeneration) return // superseded while decoding
         // Decode failed mid-scrub (corrupt sample, decoder hiccup) - fall
         // back to the reseek-based loop from wherever we got to rather than
         // freezing on a dead scrub.
         console.warn('Frame cache decode failed mid-scrub, falling back to reseeking', err)
-        stopped = true
         stopCanvasRewind()
         startReseekRewind()
         return
       }
+      if (transportGeneration.current !== myGeneration) return // superseded while decoding
+
+      if (frame && ctx) {
+        if (canvas.width !== frame.displayWidth) canvas.width = frame.displayWidth
+        if (canvas.height !== frame.displayHeight) canvas.height = frame.displayHeight
+        ctx.drawImage(frame, 0, 0)
+        // Track the actual frame drawn, not the idealized continuous
+        // `time` above - getFrameAtOrBefore returns the nearest frame AT
+        // OR BEFORE that time, so the two can differ by up to one frame's
+        // duration. The clock (and the eventual <video> sync in
+        // stopCanvasRewind) should reflect what's actually on screen.
+        lastDrawnTimeRef.current = frame.timestamp / 1e6
+      }
 
       marks.setCurrentTime(lastDrawnTimeRef.current)
       if (time <= 0) {
-        stopped = true
         stopCanvasRewind()
         return
       }
