@@ -15,6 +15,15 @@ export function useSequencePlayer(clips) {
   const [clipIndex, setClipIndex] = useState(0)
   const [isPlaying, setIsPlaying] = useState(false)
   const [globalTime, setGlobalTime] = useState(0)
+  // Set by checkPosition when playback stops because it ran off the last
+  // clip's end, cleared by anything that repositions playback (loadClip,
+  // seek). play() reads this to decide whether pressing PLAY again should
+  // restart from the top - it used to infer "ended" from
+  // video.currentTime >= clip.outPoint, which relied on the old one-frame
+  // overshoot actually reaching outPoint; checkPosition now stops just
+  // before it, so that comparison can no longer tell "ended" from "still
+  // has a hair left to play".
+  const reachedEndRef = useRef(false)
 
   const duration = totalLength(clips)
 
@@ -36,6 +45,7 @@ export function useSequencePlayer(clips) {
     const video = videoRef.current
     const clip = clipsRef.current[index]
     if (!video || !clip) return
+    reachedEndRef.current = false
 
     const resume = () => {
       video.currentTime = clip.inPoint
@@ -52,22 +62,56 @@ export function useSequencePlayer(clips) {
     setClipIndex(index)
   }, [])
 
-  const checkPosition = useCallback(() => {
-    const video = videoRef.current
-    const clip = clipsRef.current[clipIndex]
-    if (!video || !clip) return
+  // Tracks the previous tick's presented-frame time so checkPosition can
+  // estimate the source's frame duration and predict the next frame's
+  // timing - see checkPosition for why. Reset to null whenever a clip swap
+  // happens so the new clip's first tick doesn't compare against the old
+  // clip's unrelated timestamp.
+  const lastFrameTimeRef = useRef(null)
 
-    setGlobalTime(offsetOf(clipIndex) + Math.max(0, video.currentTime - clip.inPoint))
+  const checkPosition = useCallback(
+    (_now, metadata) => {
+      const video = videoRef.current
+      const clip = clipsRef.current[clipIndex]
+      if (!video || !clip) return
 
-    if (video.currentTime >= clip.outPoint) {
-      if (clipIndex + 1 < clipsRef.current.length) {
-        loadClip(clipIndex + 1, { play: isPlaying })
-      } else {
-        video.pause()
-        setIsPlaying(false)
+      // metadata.mediaTime (from requestVideoFrameCallback) is the exact
+      // presentation time of the frame that was just shown - more precise
+      // than video.currentTime, which the rAF fallback path doesn't have.
+      const frameTime = metadata?.mediaTime ?? video.currentTime
+      const frameDuration = lastFrameTimeRef.current != null
+        ? Math.max(0, frameTime - lastFrameTimeRef.current)
+        : 1 / 30 // no prior sample yet (first tick of a clip) - a reasonable guess
+      lastFrameTimeRef.current = frameTime
+
+      setGlobalTime(offsetOf(clipIndex) + Math.max(0, frameTime - clip.inPoint))
+
+      // Cut as soon as the NEXT frame would land past outPoint, instead of
+      // reacting only once a frame already past it has been shown. That
+      // reactive check (frameTime >= clip.outPoint) is why preview could
+      // show one extra frame beyond the marked out point even though
+      // export matches exactly - ffmpeg re-encodes to an exact duration,
+      // it doesn't have to land on whichever discrete frame the source
+      // happens to have, so it never had this problem to begin with.
+      // Predicting via the last measured frame duration assumes roughly
+      // constant frame rate (true for the camera-recorded footage this app
+      // targets); the half-frame margin absorbs normal timing jitter in
+      // that estimate, biasing toward cutting a fraction of a frame early
+      // over ever overshooting again.
+      const nextFrameWouldOvershoot = frameTime + frameDuration * 0.5 >= clip.outPoint
+      if (nextFrameWouldOvershoot) {
+        if (clipIndex + 1 < clipsRef.current.length) {
+          loadClip(clipIndex + 1, { play: isPlaying })
+        } else {
+          video.pause()
+          setIsPlaying(false)
+          reachedEndRef.current = true
+        }
+        lastFrameTimeRef.current = null
       }
-    }
-  }, [clipIndex, isPlaying, loadClip, offsetOf])
+    },
+    [clipIndex, isPlaying, loadClip, offsetOf],
+  )
 
   // Drive cut-point detection from actual decoded frames rather than the
   // 'timeupdate' event, which the spec only guarantees fires "4 to 66 times
@@ -90,9 +134,9 @@ export function useSequencePlayer(clips) {
       handle = useFrameCallback ? video.requestVideoFrameCallback(tick) : requestAnimationFrame(tick)
     }
 
-    function tick() {
+    function tick(now, metadata) {
       if (cancelled) return
-      checkPosition()
+      checkPosition(now, metadata)
       scheduleNext()
     }
 
@@ -114,15 +158,14 @@ export function useSequencePlayer(clips) {
   const play = useCallback(() => {
     if (clipsRef.current.length === 0) return
     const video = videoRef.current
-    const clip = clipsRef.current[clipIndex]
     // If we've played off the end, restart from the top.
-    if (clip && video.currentTime >= clip.outPoint && clipIndex === clipsRef.current.length - 1) {
+    if (reachedEndRef.current) {
       loadClip(0, { play: true })
     } else {
       video.play()
     }
     setIsPlaying(true)
-  }, [clipIndex, loadClip])
+  }, [loadClip])
 
   const pause = useCallback(() => {
     videoRef.current?.pause()
@@ -136,6 +179,8 @@ export function useSequencePlayer(clips) {
   // Seek to an absolute position on the combined timeline, resolving which
   // clip that falls in and swapping the source if needed.
   const seek = useCallback((time) => {
+    reachedEndRef.current = false
+    lastFrameTimeRef.current = null
     const list = clipsRef.current
     let remaining = Math.max(0, Math.min(time, totalLength(list)))
     let index = 0
