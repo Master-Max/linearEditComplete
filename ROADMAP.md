@@ -73,16 +73,31 @@ problem without touching the recorder/timeline deck at all.
   automatically (`startReseekRewind()` in `ClassicPlayerDeck.jsx`, unchanged
   from before this slice). FF still plays through `<video>` unchanged - only
   REW moved off it, and only on the player/source deck.
-- **Shipped (on `claude/play-ff-decouple`, not yet merged):** PLAY and FF
-  also draw from the frame cache now, via `startForwardCanvas()` in
-  `ClassicPlayerDeck.jsx` - `<video>` keeps playing normally underneath
-  (unchanged `play()`/`playbackRate` calls, still what produces audio and
-  drives timing) but its own decoded frames are no longer what's on screen.
-  `requestVideoFrameCallback`'s `metadata.mediaTime` - the exact
-  presentation time `<video>` just reached - is fed to
-  `cache.getFrameAtOrBefore()` to pick the matching frame, which is what
-  keeps this in sync with `<video>`'s own audio without any separate
-  audio/timing engine. JOG was also moved onto the cache
+- **Shipped (on `claude/play-ff-decouple`, not yet merged):** the canvas is
+  now the single display surface for every transport, via
+  `startForwardCanvas()` in `ClassicPlayerDeck.jsx` for PLAY/FF -
+  `<video>` keeps playing normally underneath (unchanged
+  `play()`/`playbackRate` calls, still what produces audio and drives
+  timing) with the canvas laid over it, so there's no video/canvas swap
+  mid-transport.
+  Forward playback deliberately does **not** pull from the frame cache,
+  though the first cut of this did and it was a mistake worth recording:
+  `<video>` has already decoded exactly the right frame, on the browser's
+  hardware-timed schedule, by the time `requestVideoFrameCallback` hands
+  over `metadata.mediaTime` for it. Decoding it again ourselves can at best
+  tie, and the first version lost badly - it awaited
+  `cache.getFrameAtOrBefore()` inside the callback and only re-registered
+  the next one afterwards, so every frame presented during that await got
+  no callback at all and was silently skipped. Measured against a 25fps
+  source (40ms/frame) with 50ms of decode latency, that dropped 11 of 24
+  frames and stretched the survivors over 51-100ms gaps - the "jittery
+  playback" that got reported. It also decoded every frame twice, which is
+  real CPU at 1080p. Now the callback re-registers synchronously and draws
+  `<video>` itself, which measures at a flat 40.0ms cadence matching the
+  source exactly, and is unaffected by decode latency because it never
+  touches the decoder. The frame cache still earns its keep on REW and jog,
+  where `<video>` genuinely can't help.
+  JOG was also moved onto the cache
   (`ClassicPlayerDeck.jsx`'s `jog()`), showing the decoded frame instantly
   via canvas while `<video>`'s own (slower) seek catches up underneath,
   handing back to `<video>` once it does - guarded by a
@@ -94,10 +109,9 @@ problem without touching the recorder/timeline deck at all.
   background decoding of the neighboring GOPs on each side, sharing the
   cache's single `VideoDecoder` via a serialized job queue, so a REW/jog
   step that crosses into an already-prefetched neighbor is a cache hit
-  instead of a fresh decode-and-wait - this is what the "known rough edge"
-  noted in the PLAY/FF decoupling commit (a stall at each GOP boundary
-  during continuous forward playback) actually needed, not something
-  separate.
+  instead of a fresh decode-and-wait. (The GOP-boundary stall originally
+  noted against forward playback is moot now that forward playback doesn't
+  decode at all - the prefetch window is there for REW and jog, which do.)
 - **Still proposed:** the recorder/timeline deck's `skip()` REW, and
   dropping the `<video>` fallback path entirely.
 
