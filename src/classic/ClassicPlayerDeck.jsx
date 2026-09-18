@@ -80,6 +80,29 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip }
   // and every transport falls back to driving <video> directly, as before
   // this cache existed.
   useEffect(() => {
+    // The <video> element itself remounts on source change (it's keyed by
+    // source?.id), but this component doesn't - so the "cancel everything
+    // on unmount" effect below never fires here, and without this, an
+    // active REW/PLAY/FF/jog loop from the previous source would keep
+    // running (its scheduling refs untouched) right through an EJECT or a
+    // new LOAD. Bumping the generation is what actually matters: it makes
+    // any in-flight step()/onFrame() call (mid-await on a decode from the
+    // frame cache that's about to be closed below) a safe no-op instead of
+    // it running to completion against a source that no longer applies -
+    // same protection as every other transport action gets, just triggered
+    // by a prop change instead of a button press. The cancel calls below
+    // are best-effort on top of that (harmless if they end up targeting a
+    // freshly-remounted <video> rather than the one that scheduled them).
+    transportGeneration.current++
+    clearInterval(rewindTimer.current)
+    cancelAnimationFrame(rewindRaf.current)
+    rewindRaf.current = null
+    if (forwardRvfc.current != null) {
+      videoRef.current?.cancelVideoFrameCallback?.(forwardRvfc.current)
+      forwardRvfc.current = null
+    }
+    setIsCanvasActive(false)
+
     let cancelled = false
     frameCacheRef.current?.close()
     frameCacheRef.current = null
@@ -165,65 +188,72 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip }
     setIsCanvasActive(false)
   }
 
-  // Drives the overlay canvas from the WebCodecs frame cache during normal
-  // forward playback (PLAY/FF), instead of letting <video>'s own decoded
-  // frames be what's on screen - see the "WebCodecs-based scrub/rewind"
-  // entry in ROADMAP.md. <video> keeps playing completely normally
-  // underneath (same play()/playbackRate calls as always) and is still
-  // what actually produces audio and drives the playback clock; only the
-  // pixels shown come from our own decode instead of the browser's. Reading
-  // metadata.mediaTime from requestVideoFrameCallback - the exact
-  // presentation time of the frame <video> itself just displayed - is what
-  // keeps the two in lockstep without needing any separate audio/timing
-  // engine: video's own audio is already synced to that timeline, we're
-  // just asking "what should be on screen at the instant video reached
-  // this point" and drawing our own answer over it.
+  // Keeps the overlay canvas as the single display surface during forward
+  // playback (PLAY/FF), mirroring each frame <video> presents onto it via
+  // requestVideoFrameCallback.
   //
-  // Known rough edge: getFrameAtOrBefore decodes a whole GOP synchronously
-  // the first time playback crosses into one it hasn't cached yet (see
-  // VideoFrameCache._decodeGop), so there's a real chance of a brief stall
-  // right at each GOP boundary rather than a perfectly smooth scan through
-  // long forward playback - worth specifically watching for during testing,
-  // especially at FF's 4x rate where boundaries come up more often per
-  // second of wall-clock time. A prefetch-the-next-GOP-ahead-of-time step
-  // would be the fix if that shows up as a real problem.
-  function startForwardCanvas(cache) {
+  // This deliberately does NOT pull frames from the WebCodecs cache the way
+  // REW does, and that's the whole point: for forward playback <video> has
+  // already decoded exactly the right frame, on the browser's own hardware-
+  // timed schedule, by the time rVFC hands us metadata.mediaTime for it.
+  // Decoding it a second time ourselves can at best match that and in
+  // practice loses to it - the earlier version awaited
+  // cache.getFrameAtOrBefore() here and only re-registered the next
+  // callback afterwards, so every frame <video> presented during that await
+  // never got a callback at all and was silently skipped. Measured at 50ms
+  // decode latency against a 25fps source (40ms/frame), that dropped 11 of
+  // 24 frames and spread the survivors over 51-100ms gaps instead of a
+  // steady 40 - visible as jitter. It also meant decoding every frame twice
+  // (once natively for <video>, once for us), which is real CPU on 1080p
+  // and can make the native playback itself hitch.
+  //
+  // So: re-register synchronously, draw synchronously, source the pixels
+  // from the element that already has them. Canvas still owns the display
+  // (no video/canvas swapping mid-transport, which is what the decoupling
+  // was for), and the frame cache still earns its keep on REW and jog,
+  // where <video> genuinely can't help.
+  function startForwardCanvas() {
     const video = videoRef.current
     const canvas = canvasRef.current
     const ctx = canvas?.getContext('2d')
     if (!video || !canvas || !ctx || typeof video.requestVideoFrameCallback !== 'function') return
 
-    // Paint the frame <video> is already showing before swapping the canvas
-    // in, same as startCanvasRewind - no flash of the canvas's black
-    // background while the cache decodes the first frame.
+    // Paint what <video> is showing before swapping the canvas in, same as
+    // startCanvasRewind - no flash of the canvas's black background.
     paintCurrentVideoFrame(video, canvas, ctx)
     setIsCanvasActive(true)
+    // See the matching comment in startCanvasRewind for why this is a
+    // shared, always-current counter rather than a check against
+    // forwardRvfc.current alone: that ref being reassigned (a newer
+    // startForwardCanvas/startCanvasRewind call replacing it) reads as
+    // "still active" just as easily as it being null does.
+    const myGeneration = transportGeneration.current
 
-    async function onFrame(now, metadata) {
-      try {
-        const frame = await cache.getFrameAtOrBefore(metadata.mediaTime)
-        if (forwardRvfc.current == null) return // stopped while awaiting decode
-        if (frame) {
-          if (canvas.width !== frame.displayWidth) canvas.width = frame.displayWidth
-          if (canvas.height !== frame.displayHeight) canvas.height = frame.displayHeight
-          ctx.drawImage(frame, 0, 0)
-          marks.setCurrentTime(frame.timestamp / 1e6)
+    function onFrame(now, metadata) {
+      if (transportGeneration.current !== myGeneration) return
+
+      // Re-register first and synchronously. Nothing between the callback
+      // firing and this line can let a presented frame slip past
+      // unrendered - which is exactly what awaiting before this allowed.
+      const stillRunning = !video.paused && !video.ended
+      if (stillRunning) forwardRvfc.current = video.requestVideoFrameCallback(onFrame)
+
+      if (video.videoWidth) {
+        if (canvas.width !== video.videoWidth) canvas.width = video.videoWidth
+        if (canvas.height !== video.videoHeight) canvas.height = video.videoHeight
+        try {
+          ctx.drawImage(video, 0, 0)
+        } catch {
+          // Not drawable this instant - keep the previous frame up rather
+          // than blanking the canvas for one tick.
         }
-      } catch (err) {
-        // Decode failed mid-playback - drop back to <video>'s own rendering
-        // rather than freezing on a dead canvas. <video> itself was never
-        // touched, so it's already showing the right thing.
-        console.warn('Frame cache decode failed during playback, showing <video> directly', err)
-        stopForwardCanvas()
-        return
       }
+      marks.setCurrentTime(metadata.mediaTime)
+      lastDrawnTimeRef.current = metadata.mediaTime
 
-      if (!video.paused && !video.ended) {
-        forwardRvfc.current = video.requestVideoFrameCallback(onFrame)
-      } else {
-        // Playback stopped on its own (FF/PLAY ran off the end) rather than
-        // via still()/rewind() - nothing left to render, hand back to
-        // <video>'s own display of its final frame.
+      if (!stillRunning) {
+        // Playback stopped on its own (ran off the end) rather than via
+        // still()/rewind() - hand back to <video>'s own display.
         stopForwardCanvas()
       }
     }
@@ -239,8 +269,12 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip }
     const v = videoRef.current
     if (!v) return
     v.playbackRate = 1
-    const cache = frameCacheRef.current
-    if (cache) startForwardCanvas(cache)
+    // Gated on the frame cache existing even though forward rendering no
+    // longer reads from it: that's the signal REW will also be canvas-based
+    // this session, so the display surface stays consistent across
+    // transports. Without a cache, REW falls back to reseeking <video>
+    // directly and <video> stays the visible element throughout.
+    if (frameCacheRef.current) startForwardCanvas()
     // play() returns a promise that rejects with AbortError if the play
     // request gets interrupted (e.g. a pause()/another play() call lands
     // before it resolves - REW does exactly that). Expected and harmless,
@@ -264,8 +298,7 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip }
     const v = videoRef.current
     if (!v) return
     v.playbackRate = 4
-    const cache = frameCacheRef.current
-    if (cache) startForwardCanvas(cache)
+    if (frameCacheRef.current) startForwardCanvas() // see the note in play()
     v.play().catch(() => {})
   }
 
@@ -290,43 +323,56 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip }
     lastDrawnTimeRef.current = startTime
     setIsCanvasActive(true)
     let lastTs = performance.now()
-    let stopped = false
+    // Captured now, checked after every await below - NOT a local `stopped`
+    // flag, because stopCanvasRewind() (called from play()/still()/etc, all
+    // of which bump transportGeneration first) can only cancel the *next*
+    // scheduled tick. It can't reach into a step() call that's already
+    // mid-await on a frame decode, so a purely local flag never gets set in
+    // time: that in-flight call finishes unaware anything changed and
+    // reschedules itself via requestAnimationFrame(step), leaving REW
+    // silently still running - and eventually calling stopCanvasRewind()
+    // itself once its own countdown reaches 0, yanking video.currentTime
+    // backward - well after PLAY/FF/STILL/another REW has taken over. This
+    // is the "rewind still happening after pressing play" bug: checking the
+    // shared, always-current counter instead catches that case.
+    const myGeneration = transportGeneration.current
 
     async function step(now) {
-      if (stopped) return
+      if (transportGeneration.current !== myGeneration) return
       const elapsed = (now - lastTs) / 1000
       lastTs = now
       const time = Math.max(0, scrubTimeRef.current - elapsed * REWIND_RATE)
       scrubTimeRef.current = time
 
+      let frame
       try {
-        const frame = await cache.getFrameAtOrBefore(time)
-        if (stopped) return
-        if (frame && ctx) {
-          if (canvas.width !== frame.displayWidth) canvas.width = frame.displayWidth
-          if (canvas.height !== frame.displayHeight) canvas.height = frame.displayHeight
-          ctx.drawImage(frame, 0, 0)
-          // Track the actual frame drawn, not the idealized continuous
-          // `time` above - getFrameAtOrBefore returns the nearest frame AT
-          // OR BEFORE that time, so the two can differ by up to one frame's
-          // duration. The clock (and the eventual <video> sync in
-          // stopCanvasRewind) should reflect what's actually on screen.
-          lastDrawnTimeRef.current = frame.timestamp / 1e6
-        }
+        frame = await cache.getFrameAtOrBefore(time)
       } catch (err) {
+        if (transportGeneration.current !== myGeneration) return // superseded while decoding
         // Decode failed mid-scrub (corrupt sample, decoder hiccup) - fall
         // back to the reseek-based loop from wherever we got to rather than
         // freezing on a dead scrub.
         console.warn('Frame cache decode failed mid-scrub, falling back to reseeking', err)
-        stopped = true
         stopCanvasRewind()
         startReseekRewind()
         return
       }
+      if (transportGeneration.current !== myGeneration) return // superseded while decoding
+
+      if (frame && ctx) {
+        if (canvas.width !== frame.displayWidth) canvas.width = frame.displayWidth
+        if (canvas.height !== frame.displayHeight) canvas.height = frame.displayHeight
+        ctx.drawImage(frame, 0, 0)
+        // Track the actual frame drawn, not the idealized continuous
+        // `time` above - getFrameAtOrBefore returns the nearest frame AT
+        // OR BEFORE that time, so the two can differ by up to one frame's
+        // duration. The clock (and the eventual <video> sync in
+        // stopCanvasRewind) should reflect what's actually on screen.
+        lastDrawnTimeRef.current = frame.timestamp / 1e6
+      }
 
       marks.setCurrentTime(lastDrawnTimeRef.current)
       if (time <= 0) {
-        stopped = true
         stopCanvasRewind()
         return
       }

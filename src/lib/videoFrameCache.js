@@ -208,6 +208,17 @@ export class VideoFrameCache {
   }
 
   async _decodeGop(gopStartIndex) {
+    // close() (called whenever the consuming component's source changes or
+    // unmounts) can land while this job is queued behind another one, or
+    // even mid-loop below - decoder.decode()/flush() throw synchronously
+    // once the decoder is no longer 'configured', which without this guard
+    // surfaces as an uncaught console error even though the caller (a
+    // superseded getFrameAtOrBefore call) is already about to no-op it via
+    // the transportGeneration check. Bailing out silently here is exactly
+    // as valid an outcome as decoding successfully would have been - the
+    // result is simply not needed anymore either way.
+    if (this.decoder.state !== 'configured') return
+
     let endIndex = gopStartIndex + 1
     while (endIndex < this.decodeOrderSamples.length && !this.decodeOrderSamples[endIndex].is_sync) {
       endIndex++
@@ -221,6 +232,7 @@ export class VideoFrameCache {
     this.activeDecodeTimestamps = timestamps
 
     for (let i = gopStartIndex; i < endIndex; i++) {
+      if (this.decoder.state !== 'configured') return // closed partway through
       const s = this.decodeOrderSamples[i]
       this.decoder.decode(
         new EncodedVideoChunk({
@@ -231,6 +243,7 @@ export class VideoFrameCache {
         }),
       )
     }
+    if (this.decoder.state !== 'configured') return
     await this.decoder.flush()
     this.activeDecodeTimestamps = null
     this.decodedGops.set(gopStartIndex, timestamps)

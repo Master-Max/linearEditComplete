@@ -31,6 +31,13 @@
   background-color: #000000;
   width: 480px;
   height: 270px;
+  /* Explicit even though this already matches <video>'s own HTML5-spec
+     default (letterbox/pillarbox, centered, aspect-preserved) - stated
+     here so it's not just an easy-to-miss implicit browser behavior that
+     the canvas rule below has to be remembered to match. The recorder
+     deck's <video> overrides this via its own inline objectFit (crop vs
+     letterbox), which wins over this rule regardless of specificity. */
+  object-fit: contain;
 }
 
 /* Wraps the player deck's <video> so a same-sized <canvas> can be laid
@@ -52,6 +59,17 @@
   height: 270px;
   background-color: #000000;
   pointer-events: none;
+  /* Unlike <video>, <canvas> has no built-in letterboxing default - it's a
+     plain replaced element, so it stretches to fill (CSS object-fit's
+     actual initial value) unless told otherwise. Without this, switching
+     the display over to canvas during REW/PLAY/FF/jog silently drops the
+     aspect-ratio preservation <video> was providing for free, distorting
+     any source that isn't exactly 16:9. canvas.width/height are already
+     set to the decoded frame's own native resolution before drawing (see
+     paintCurrentVideoFrame and the frame-draw calls in
+     ClassicPlayerDeck.jsx), so contain here fits that real aspect ratio
+     into the box the same way <video> does. */
+  object-fit: contain;
 }
 
 .classic-editor #controls {
