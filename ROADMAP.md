@@ -112,8 +112,26 @@ problem without touching the recorder/timeline deck at all.
   instead of a fresh decode-and-wait. (The GOP-boundary stall originally
   noted against forward playback is moot now that forward playback doesn't
   decode at all - the prefetch window is there for REW and jog, which do.)
+  `VideoFrameCache` also honors the source's MP4 edit list
+  (`presentationOffsetTicks()` in `videoFrameCache.js`) when converting a
+  sample's `cts` into a presentation timestamp. Skipping that was a real bug,
+  invisible to every synthetic fixture used while building this: B-frame
+  reordering means the first *displayed* frame isn't at `cts` 0, so muxers
+  write a single edit whose `media_time` is the reorder delay, and `<video>`
+  applies it. The cache didn't, so every frame it produced carried a
+  timestamp offset from the same picture's time on the `<video>` element -
+  measured at exactly 0.0833s (two frames at 24fps) on Big Buck Bunny's H.264.
+  Since REW sets the clock from `frame.timestamp` and marks are taken from
+  that clock, the offset would have landed marks a couple of frames away from
+  what the ffmpeg export produces. Fixtures encoded here never caught it
+  because VP9 has no B-frames and so gets `media_time` 0.
 - **Still proposed:** the recorder/timeline deck's `skip()` REW, and
-  dropping the `<video>` fallback path entirely.
+  dropping the `<video>` fallback path entirely. Two open items from testing
+  against real footage are written up in `TECHDEBT.md` under "Frame cache
+  decodes a whole GOP before showing anything": long GOPs make the first REW
+  press stall (612ms on a single-GOP clip vs 101ms with 2-second keyframes),
+  and sizing the retained window in GOPs rather than frames scales badly on
+  1080p sources with long GOPs.
 
 ## Load video from a hosted platform (Vimeo)
 

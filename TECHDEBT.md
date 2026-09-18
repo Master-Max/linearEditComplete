@@ -84,3 +84,55 @@ untouched as `startReseekRewind()`, used when the frame cache can't be
 built (unsupported browser, non-MP4/MOV source, unsupported codec) - for
 that fallback case, the problem described above still applies as written
 and the proposed fix above is still unapplied to it.
+
+## Frame cache decodes a whole GOP before showing anything, and sizes its window in GOPs
+
+**Where:** `src/lib/videoFrameCache.js` (`_decodeGop`, `_evictOutsideWindow`,
+`WINDOW_RADIUS_GOPS`)
+
+`getFrameAtOrBefore()` awaits `_decodeGop()`, which submits every sample in
+the containing GOP and waits for `decoder.flush()` before returning a frame.
+Eviction is likewise counted in GOPs: the cache retains the current GOP plus
+`WINDOW_RADIUS_GOPS` on each side. Both assume a GOP is a small, roughly
+fixed unit. Real footage doesn't guarantee that.
+
+Measured against Big Buck Bunny, transcoded to VP9 at 854x480/24fps so this
+sandbox's Chromium can actually decode it (it has no H.264 decoder):
+
+| source | GOP length | time from REW press to first frame on screen |
+| --- | --- | --- |
+| `-g 48` (fixed 2s keyframes) | 48 frames | **101 ms** |
+| `-g 9999` (encoder picks) | 480 frames, the whole clip | **612 ms** |
+
+That second number is the "goes black for a moment when you press REW"
+behavior, and a single-GOP file is not a contrived shape — it's what you get
+by letting the encoder decide. The H.264 original is milder but still uneven:
+its five keyframes sit at 0s, 10.4s, 11.9s, 15.8s and 23.0s, so its first GOP
+is 250 frames and its second is 35. REW does still work in every case (the
+clock stalls, then descends normally — see the REW flow suite), so this is
+latency, not breakage.
+
+The eviction side is the part with teeth. Holding three neighboring GOPs of a
+250-frame-GOP 1080p source means ~750 decoded `VideoFrame`s alive at once, and
+a 1080p I420 frame is ~3.1MB of (mostly non-JS-heap) memory — roughly 1.5GB,
+against platform limits on how many `VideoFrame`s can be open at all. The
+sandbox measurement above doesn't show it because 854x480 frames are ~8x
+smaller; the JS heap reads ~20MB either way precisely because the frames
+aren't on it.
+
+**Fix:** stop treating "a GOP" as the unit for either operation.
+- Cap retention by decoded frame count (or bytes), not GOP count, so a long
+  GOP is held partially rather than wholly.
+- Return from `getFrameAtOrBefore()` as soon as the requested timestamp shows
+  up in `frames` — `output()` already populates it progressively — instead of
+  awaiting the full `flush()`. This doesn't help the first REW press into a
+  long GOP, which genuinely has to decode from the keyframe to the target, but
+  it does drop the tail-of-GOP wait on every subsequent one.
+- For the first-press case the real answer is decoding a bounded range
+  anchored at the keyframe and re-decoding from the keyframe when a backward
+  walk runs off the front of it, which is a redesign of `_decodeGop` rather
+  than a tweak.
+
+**Status:** open. Found by testing against real footage rather than the
+synthetic fixtures used until now; those all had short, evenly spaced GOPs and
+so never exercised this.

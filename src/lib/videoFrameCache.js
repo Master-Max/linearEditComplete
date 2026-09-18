@@ -54,10 +54,47 @@ function extractDescription(mp4boxFile, trackId) {
   return undefined
 }
 
+// How far the track's media timeline is shifted to produce the presentation
+// timeline, in media timescale ticks.
+//
+// This matters because of B-frames. A sample's `cts` counts from the start of
+// the *media*, and an encoder that reorders frames has to emit the first
+// displayed frame a couple of composition steps in, so raw `cts` for that
+// frame is not 0 - it's the reorder delay. Every muxer that produces such a
+// file (x264/ffmpeg and, downstream of them, essentially every phone and
+// camera) writes an edit list saying "start the presentation at media_time",
+// and that is what makes the first displayed frame land at 0 on the clock.
+// `<video>` honors it. The sample table on its own does not, so without this
+// every VideoFrame in the cache would carry a timestamp a couple of frames
+// later than the same picture's time on the `<video>` element - which is
+// exactly the clock REW reports and marks get recorded against. On Big Buck
+// Bunny's 24fps H.264 that offset measures 0.0833s, a clean two frames.
+//
+// Two edit shapes are handled, which between them cover real files: leading
+// empty edits (media_time -1, a blank delay before the media starts) and the
+// first real edit's media_time (a trim). Anything more elaborate - multiple
+// real edits, non-1.0 rates - is a genuine edit decision list, which this
+// cache doesn't model; the first real edit still wins, matching what the rest
+// of the app assumes about a source being one continuous clip.
+function presentationOffsetTicks(mp4boxFile, trackId, movieTimescale, mediaTimescale) {
+  const entries = mp4boxFile.getTrackById(trackId)?.edts?.elst?.entries
+  if (!entries?.length) return 0
+  let emptyTicks = 0
+  for (const entry of entries) {
+    if (entry.media_time < 0) {
+      emptyTicks += (entry.segment_duration / movieTimescale) * mediaTimescale
+      continue
+    }
+    return entry.media_time - emptyTicks
+  }
+  return 0
+}
+
 function demux(file) {
   return new Promise((resolve, reject) => {
     const mp4boxFile = createFile()
     let trackInfo = null
+    let offsetTicks = 0
 
     mp4boxFile.onError = (error) => reject(new Error(`mp4box: ${error}`))
 
@@ -69,6 +106,7 @@ function demux(file) {
       }
       trackInfo = track
       trackInfo.description = extractDescription(mp4boxFile, track.id)
+      offsetTicks = presentationOffsetTicks(mp4boxFile, track.id, info.timescale, track.timescale)
       mp4boxFile.setExtractionOptions(track.id, null, { nbSamples: Infinity })
       mp4boxFile.start()
     }
@@ -78,7 +116,7 @@ function demux(file) {
         .map((s) => ({
           data: s.data,
           is_sync: s.is_sync,
-          presentationTimeUs: Math.round((s.cts / s.timescale) * 1e6),
+          presentationTimeUs: Math.round(((s.cts - offsetTicks) / s.timescale) * 1e6),
           durationUs: Math.round((s.duration / s.timescale) * 1e6),
           dts: s.dts,
         }))
