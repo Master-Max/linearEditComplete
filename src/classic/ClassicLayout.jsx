@@ -52,6 +52,7 @@ export default function ClassicLayout({
           onLoad={() => fileInputRef.current?.click()}
           onEject={() => onSelectSource(null)}
           onAddClip={onAddClip}
+          ffmpeg={ffmpeg}
         />
         <ClassicEditorConsole clips={clips} onRemove={onRemoveClip} onMove={onMoveClip} />
         <ClassicRecorderDeck clips={clips} fitMode={fitMode} />

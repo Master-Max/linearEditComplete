@@ -11,6 +11,15 @@ import { clipLength } from '../lib/clip'
 // sites at username.github.io/repo-name/.
 const CORE_BASE = `${import.meta.env.BASE_URL}ffmpeg`
 
+// Widest the intra-frame scrub proxy (see transcodeToIntraProxy below) is
+// allowed to be. The player deck's canvas only ever displays it at 480x270
+// CSS pixels (classic.css), so anything wider than a couple of HiDPI
+// multiples of that is pixels nobody sees - and every one of them costs
+// transcode time, decode time, and retained-frame memory for REW/jog.
+// Height follows via -2 (even, preserving aspect); never upscales a source
+// already narrower than this.
+const PROXY_MAX_WIDTH = 960
+
 function extensionOf(filename) {
   const dot = filename.lastIndexOf('.')
   return dot === -1 ? 'mp4' : filename.slice(dot + 1)
@@ -148,5 +157,59 @@ export function useFFmpeg() {
     [load],
   )
 
-  return { loaded, loading, progress, statusText, error, load, exportSequence }
+  // Transcodes `file`'s video track to an all-intra-frame (GOP-of-1) H.264
+  // MP4 for VideoFrameCache to build its REW/jog frame cache from, instead
+  // of the camera-original file. Every output frame is independently
+  // decodable, so a "GOP" there is exactly one frame - the "decode the
+  // whole GOP before showing anything" cost in getFrameAtOrBefore()
+  // collapses from however long the source's own encoder made its GOPs
+  // (real footage measured up to 480 frames - see TECHDEBT.md) to one,
+  // regardless of source. See the "Transcode footage on load" entry in
+  // TECHDEBT.md for the full rationale.
+  //
+  // -an: nothing that reads from this proxy plays audio - REW pauses
+  // <video> and jog shows a single still frame, both already silent, and
+  // PLAY/FF never touch this proxy at all (see startForwardCanvas in
+  // ClassicPlayerDeck.jsx). Dropping the track shrinks an already-larger-
+  // than-original file - intra frames don't compress against each other,
+  // so even at a higher CRF than export uses this typically comes out
+  // bigger than the source, not smaller.
+  // -g 1 -bf 0: every frame is its own keyframe; no B-frames means no
+  // reorder delay, so (unlike the camera-original) this proxy needs no
+  // edit-list handling for its presentation timestamps to line up.
+  // Deliberately not shared state (setProgress/setStatusText/setError) -
+  // this runs in the background whenever a source loads, and shouldn't
+  // make an unrelated Export click show a stale or confusing progress bar.
+  const transcodeToIntraProxy = useCallback(
+    async (file) => {
+      const ffmpeg = ffmpegRef.current ?? (await load())
+      const inputName = `proxy-src.${extensionOf(file.name)}`
+      const outputName = 'proxy-out.mp4'
+      try {
+        await ffmpeg.writeFile(inputName, await fetchFile(file))
+        await ffmpeg.exec([
+          '-i', inputName,
+          '-an',
+          '-vf', `scale='min(${PROXY_MAX_WIDTH},iw)':-2`,
+          '-g', '1',
+          '-bf', '0',
+          '-pix_fmt', 'yuv420p',
+          '-c:v', 'libx264',
+          '-preset', 'ultrafast',
+          '-crf', '28',
+          outputName,
+        ])
+        const data = await ffmpeg.readFile(outputName)
+        return new Blob([data.buffer], { type: 'video/mp4' })
+      } finally {
+        await Promise.all([
+          ffmpeg.deleteFile(inputName).catch(() => {}),
+          ffmpeg.deleteFile(outputName).catch(() => {}),
+        ])
+      }
+    },
+    [load],
+  )
+
+  return { loaded, loading, progress, statusText, error, load, exportSequence, transcodeToIntraProxy }
 }

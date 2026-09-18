@@ -18,6 +18,17 @@ const REWIND_RATE = 4
 // itself is untouched - only how often the *visible clock text* refreshes.
 const CLOCK_UPDATE_INTERVAL_MS = 66
 
+// VideoFrameCache's own default window radius (see WINDOW_RADIUS_GOPS in
+// videoFrameCache.js) is deliberately small - 1 - because a GOP in the
+// camera-original file can run into the hundreds of frames, and each one
+// costs real decoded-frame memory. Once the source has been transcoded to
+// an all-intra proxy (see the ffmpeg-backed effect below), a "GOP" is a
+// single frame, so the same memory budget buys a much wider retained
+// window: 15 either side of 1080p is ~90MB, comfortably under
+// PREFETCH_BYTE_BUDGET, and gives REW/jog a deep enough buffer that
+// stepping around the current position rarely triggers a fresh decode.
+const PROXY_WINDOW_RADIUS_FRAMES = 15
+
 // Paints whatever <video> currently has decoded onto the canvas, best-
 // effort - used to avoid a flash of the canvas's own black background at
 // the instant it's swapped in for REW or forward playback. video.videoWidth
@@ -65,7 +76,7 @@ const ACTION_KEY_LABELS = {
   jogRight: '>',
 }
 
-export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip }) {
+export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip, ffmpeg }) {
   const videoRef = useRef(null)
   const canvasRef = useRef(null)
   const marks = usePlayerMarks(videoRef, source)
@@ -73,6 +84,13 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip }
   const rewindRaf = useRef(null)
   const forwardRvfc = useRef(null)
   const frameCacheRef = useRef(null)
+  const [isPreparingScrub, setIsPreparingScrub] = useState(false)
+  // ffmpeg is a fresh object identity from useFFmpeg() on every render of
+  // App - reading it through a ref (kept fresh every render, like marksRef
+  // below) rather than depending on it directly keeps the cache-build
+  // effect from re-running, and re-transcoding, on every unrelated re-render.
+  const ffmpegRef = useRef(ffmpeg)
+  ffmpegRef.current = ffmpeg
   const scrubTimeRef = useRef(0)
   const lastDrawnTimeRef = useRef(0)
   // Bumped at the start of every transport action (play/still/fastForward/
@@ -98,13 +116,23 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip }
     marks.setCurrentTime(time)
   }
 
-  // Demux+decode the source with WebCodecs (see src/lib/videoFrameCache.js)
-  // as soon as it loads, so rewind()/play()/fastForward() have a ready
-  // frame cache to render from instead of the <video> element's own
+  // Builds the WebCodecs frame cache (see src/lib/videoFrameCache.js) as
+  // soon as the source loads, so rewind()/play()/fastForward() have a
+  // ready frame cache to render from instead of the <video> element's own
   // decode. Anything that fails here (unsupported browser, non-MP4/MOV
   // container, unsupported codec) just leaves frameCacheRef.current null,
   // and every transport falls back to driving <video> directly, as before
   // this cache existed.
+  //
+  // Before demuxing, tries to transcode the source to an all-intra proxy
+  // (see transcodeToIntraProxy in useFFmpeg.js) and build the cache from
+  // that instead of the camera-original file - every output frame is its
+  // own GOP, which is what actually fixes REW/jog's GOP-decode latency
+  // rather than just working around it (see "Transcode footage on load" in
+  // TECHDEBT.md). If ffmpeg can't run at all, or the transcode itself
+  // fails, this falls through to demuxing the original file exactly as
+  // before the proxy existed - the proxy is a strict enhancement, never a
+  // requirement.
   useEffect(() => {
     // The <video> element itself remounts on source change (it's keyed by
     // source?.id), but this component doesn't - so the "cancel everything
@@ -132,22 +160,43 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip }
     let cancelled = false
     frameCacheRef.current?.close()
     frameCacheRef.current = null
+    setIsPreparingScrub(false)
 
-    if (source?.file && isFrameCacheSupported()) {
-      const cache = new VideoFrameCache(source.file)
-      cache
-        .init()
-        .then(() => {
-          if (cancelled) {
-            cache.close()
-            return
-          }
-          frameCacheRef.current = cache
-        })
-        .catch((err) => {
-          console.warn('WebCodecs frame cache unavailable, REW will reseek instead', err)
-        })
+    async function buildCache() {
+      if (!source?.file || !isFrameCacheSupported()) return
+
+      let proxyFile = null
+      const ffmpegApi = ffmpegRef.current
+      if (ffmpegApi && !ffmpegApi.error) {
+        setIsPreparingScrub(true)
+        try {
+          proxyFile = await ffmpegApi.transcodeToIntraProxy(source.file)
+        } catch (err) {
+          console.warn('Intra-frame scrub proxy failed, REW/jog will use the source GOPs', err)
+        } finally {
+          if (!cancelled) setIsPreparingScrub(false)
+        }
+        if (cancelled) return
+      }
+
+      const cache = proxyFile
+        ? new VideoFrameCache(proxyFile, { windowRadiusGops: PROXY_WINDOW_RADIUS_FRAMES })
+        : new VideoFrameCache(source.file)
+
+      try {
+        await cache.init()
+      } catch (err) {
+        console.warn('WebCodecs frame cache unavailable, REW will reseek instead', err)
+        return
+      }
+      if (cancelled) {
+        cache.close()
+        return
+      }
+      frameCacheRef.current = cache
     }
+
+    buildCache()
 
     return () => {
       cancelled = true
@@ -642,6 +691,7 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip }
         <b className={marks.outPoint < (source?.duration ?? 0) ? 'light lock' : 'light'}>OUT</b>
       </div>
       <div className="clock">{formatTimecode(marks.currentTime)}</div>
+      {isPreparingScrub && <p className="scrub-status">Preparing fast scrub…</p>}
 
       <div className="player-frame">
         {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
