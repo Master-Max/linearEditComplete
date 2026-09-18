@@ -198,6 +198,10 @@ export default function App() {
           <ExportPanel clips={clips} ffmpeg={ffmpeg} resolution={effectiveResolution} fitMode={fitMode} />
         </main>
       )}
+
+      <footer className="border-t border-slate-200 px-6 py-3 text-center text-xs text-slate-400">
+        build {import.meta.env.VITE_COMMIT_HASH ?? 'dev'}
+      </footer>
     </div>
   )
 }
