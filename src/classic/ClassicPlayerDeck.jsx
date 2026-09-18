@@ -6,6 +6,18 @@ import { VideoFrameCache, isFrameCacheSupported } from '../lib/videoFrameCache'
 // Nominal REW rate, matching FF's native 4x playbackRate.
 const REWIND_RATE = 4
 
+// How often the canvas render loops (REW, and forward playback/FF) are
+// allowed to push a new currentTime into React state. <video>'s own
+// 'timeupdate' event - what drives the clock the rest of the time - is
+// already throttled by the browser to a few times a second; calling
+// marks.setCurrentTime on every single drawn frame instead (up to 60Hz for
+// REW, and yet more callbacks in real time for FF) means a full re-render of
+// the deck (clock text, IN/OUT lights, etc.) on the same thread that's also
+// decoding/drawing that frame, which is what made REW/jog feel sluggish and
+// FF stutter once playback moved onto this canvas path. The frame drawing
+// itself is untouched - only how often the *visible clock text* refreshes.
+const CLOCK_UPDATE_INTERVAL_MS = 66
+
 // Paints whatever <video> currently has decoded onto the canvas, best-
 // effort - used to avoid a flash of the canvas's own black background at
 // the instant it's swapped in for REW or forward playback. video.videoWidth
@@ -71,6 +83,20 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip }
   // action's canvas state.
   const transportGeneration = useRef(0)
   const [isCanvasActive, setIsCanvasActive] = useState(false)
+  // Wall-clock time of the last marks.setCurrentTime call made from a canvas
+  // render loop - see CLOCK_UPDATE_INTERVAL_MS/updateClock below.
+  const lastClockUpdateRef = useRef(0)
+
+  // Pushes `time` into the clock/marks state, throttled to
+  // CLOCK_UPDATE_INTERVAL_MS unless `force` is set (used for the last frame
+  // of a run, so the displayed clock always lands exactly where the run
+  // actually stopped rather than up to one throttle interval short).
+  function updateClock(time, force = false) {
+    const now = performance.now()
+    if (!force && now - lastClockUpdateRef.current < CLOCK_UPDATE_INTERVAL_MS) return
+    lastClockUpdateRef.current = now
+    marks.setCurrentTime(time)
+  }
 
   // Demux+decode the source with WebCodecs (see src/lib/videoFrameCache.js)
   // as soon as it loads, so rewind()/play()/fastForward() have a ready
@@ -222,6 +248,9 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip }
     // startCanvasRewind - no flash of the canvas's black background.
     paintCurrentVideoFrame(video, canvas, ctx)
     setIsCanvasActive(true)
+    // Reset so this run's first clock update lands immediately rather than
+    // being throttled against whatever the previous run's last update was.
+    lastClockUpdateRef.current = 0
     // See the matching comment in startCanvasRewind for why this is a
     // shared, always-current counter rather than a check against
     // forwardRvfc.current alone: that ref being reassigned (a newer
@@ -248,8 +277,10 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip }
           // than blanking the canvas for one tick.
         }
       }
-      marks.setCurrentTime(metadata.mediaTime)
       lastDrawnTimeRef.current = metadata.mediaTime
+      // Force the final update so the clock lands exactly on the last
+      // presented frame instead of up to CLOCK_UPDATE_INTERVAL_MS short.
+      updateClock(metadata.mediaTime, !stillRunning)
 
       if (!stillRunning) {
         // Playback stopped on its own (ran off the end) rather than via
@@ -322,6 +353,9 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip }
     paintCurrentVideoFrame(video, canvas, ctx)
     lastDrawnTimeRef.current = startTime
     setIsCanvasActive(true)
+    // Reset so this run's first clock update lands immediately rather than
+    // being throttled against whatever the previous run's last update was.
+    lastClockUpdateRef.current = 0
     let lastTs = performance.now()
     // Captured now, checked after every await below - NOT a local `stopped`
     // flag, because stopCanvasRewind() (called from play()/still()/etc, all
@@ -382,7 +416,9 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip }
         lastDrawnTimeRef.current = frame.timestamp / 1e6
       }
 
-      marks.setCurrentTime(lastDrawnTimeRef.current)
+      // Force the final update so the clock lands exactly where REW
+      // stopped instead of up to CLOCK_UPDATE_INTERVAL_MS short.
+      updateClock(lastDrawnTimeRef.current, time <= 0)
       if (time <= 0) {
         stopCanvasRewind()
         return

@@ -155,3 +155,30 @@ footage:
 
 Neither guard removes the underlying cost; they stop it from presenting as a
 frozen deck.
+
+A third pass fixed two costs that were adding to the above rather than being
+it, found after users reported REW/jog/FF all feeling noticeably slower once
+playback moved onto this cache and its canvas rendering:
+- `_bestCachedFrame`/`_earliestCachedFrame` did a linear scan over every
+  cached `VideoFrame` (`for (const key of this.frames.keys())`), called on
+  every REW tick (~60/sec) and every jog press. With a window of three GOPs
+  retained at once, real footage with long GOPs means that scan is over
+  hundreds to 1000+ entries, every tick. Replaced with a sorted
+  `cachedTimestampsUs` array (kept in sync on insert/evict) and a binary
+  search, mirroring `_timeIndexAtOrBefore`.
+- `_prefetchAround` decoded both neighboring GOPs unconditionally. During a
+  sustained REW or repeated jog in one direction, the neighbor on the far
+  side of travel is pure waste competing for the same `decodeQueue` as the
+  GOP actually about to be needed next. `getFrameAtOrBefore` now infers
+  travel direction from the previous request and `_prefetchAround` skips the
+  wrong-side neighbor while direction holds.
+- Separately, in `ClassicPlayerDeck.jsx`: the REW and forward-canvas
+  (PLAY/FF) render loops called `marks.setCurrentTime` — a React state
+  update that re-renders the whole deck — on every single drawn frame,
+  instead of at the throttled rate `<video>`'s own `timeupdate` event
+  provides the rest of the time. Throttled to `CLOCK_UPDATE_INTERVAL_MS`
+  (~15Hz), with a forced final update so the clock always lands exactly
+  where a run stopped.
+
+None of this touches the whole-GOP-decode-before-first-frame cost above,
+which is still open.

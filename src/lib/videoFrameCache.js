@@ -195,7 +195,15 @@ export class VideoFrameCache {
     this.keyframeIndices = [] // sample index of each GOP's start, ascending
     this.keyframeTimesUs = [] // parallel to keyframeIndices
     this.currentGopStart = -1 // GOP most recently actually requested
+    this.lastRequestedUs = null // targetUs of the previous getFrameAtOrBefore call, for prefetch direction
     this.frames = new Map() // presentationTimeUs -> VideoFrame, across every retained GOP
+    // Ascending array of frames.keys() - kept in sync on every insert/evict
+    // so _bestCachedFrame/_earliestCachedFrame can binary-search instead of
+    // scanning the whole cache, which REW and jog call on every tick/press
+    // and which can hold 1000+ frames on real footage with long GOPs (see
+    // "Frame cache decodes a whole GOP before showing anything" in
+    // TECHDEBT.md).
+    this.cachedTimestampsUs = []
     this.decodedGops = new Map() // gopStartIndex -> timestampsUs decoded for it (for eviction)
     this.pendingGops = new Map() // gopStartIndex -> in-flight decode Promise
     this.decodeQueue = Promise.resolve() // serializes decode+flush jobs on the single decoder
@@ -236,6 +244,7 @@ export class VideoFrameCache {
     this.decoder = new VideoDecoder({
       output: (frame) => {
         this.frames.set(frame.timestamp, frame)
+        this._insertCachedTimestamp(frame.timestamp)
         this.activeDecodeTimestamps?.push(frame.timestamp)
       },
       // WebCodecs closes the decoder when it errors, so the cache is dead
@@ -296,20 +305,55 @@ export class VideoFrameCache {
     return result
   }
 
-  _bestCachedFrame(targetUs) {
-    let bestKey = -1
-    for (const key of this.frames.keys()) {
-      if (key <= targetUs && key > bestKey) bestKey = key
+  // Largest index in ascending `arr` whose value is <= target, or -1 if
+  // target precedes every element. Shared by every "which sample covers
+  // this time" lookup in this class.
+  _indexAtOrBefore(arr, target) {
+    let lo = 0
+    let hi = arr.length - 1
+    let ans = -1
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1
+      if (arr[mid] <= target) {
+        ans = mid
+        lo = mid + 1
+      } else {
+        hi = mid - 1
+      }
     }
-    return bestKey === -1 ? null : this.frames.get(bestKey)
+    return ans
+  }
+
+  // Index in ascending `arr` where `value` belongs to keep it sorted (the
+  // index of the first element >= value, or arr.length if none) - used to
+  // maintain cachedTimestampsUs as frames are decoded and evicted.
+  _insertionIndex(arr, value) {
+    let lo = 0
+    let hi = arr.length
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1
+      if (arr[mid] < value) lo = mid + 1
+      else hi = mid
+    }
+    return lo
+  }
+
+  _insertCachedTimestamp(ts) {
+    this.cachedTimestampsUs.splice(this._insertionIndex(this.cachedTimestampsUs, ts), 0, ts)
+  }
+
+  _removeCachedTimestamp(ts) {
+    const idx = this._insertionIndex(this.cachedTimestampsUs, ts)
+    if (this.cachedTimestampsUs[idx] === ts) this.cachedTimestampsUs.splice(idx, 1)
+  }
+
+  _bestCachedFrame(targetUs) {
+    const idx = this._indexAtOrBefore(this.cachedTimestampsUs, targetUs)
+    return idx === -1 ? null : this.frames.get(this.cachedTimestampsUs[idx])
   }
 
   _earliestCachedFrame() {
-    let bestKey = Infinity
-    for (const key of this.frames.keys()) {
-      if (key < bestKey) bestKey = key
-    }
-    return bestKey === Infinity ? null : this.frames.get(bestKey)
+    return this.cachedTimestampsUs.length ? this.frames.get(this.cachedTimestampsUs[0]) : null
   }
 
   // Two very different reasons the decoder can stop being usable, which
@@ -421,6 +465,7 @@ export class VideoFrameCache {
     for (const ts of timestamps) {
       this.frames.get(ts)?.close()
       this.frames.delete(ts)
+      this._removeCachedTimestamp(ts)
     }
     this.decodedGops.delete(gopStartIndex)
   }
@@ -438,9 +483,20 @@ export class VideoFrameCache {
   // hopefully already sitting in the cache instead of triggering a fresh
   // decode-and-wait. Failures here are swallowed (logged) rather than
   // thrown, since nothing is actually waiting on a prefetch to succeed.
-  _prefetchAround(centerGopStart) {
+  //
+  // `direction` (-1 backward, +1 forward, 0 unknown) biases which neighbour
+  // gets prefetched. Both neighbours share the same decodeQueue as whatever
+  // GOP gets asked for next, so during a sustained REW or repeated jog in
+  // one direction, decoding the neighbour on the *other* side is pure waste
+  // competing for the same queue as the GOP that's actually about to be
+  // needed - it's only useful if travel direction reverses, which is rare
+  // mid-run. Unknown direction (the first call of a run) still prefetches
+  // both, same as before.
+  _prefetchAround(centerGopStart, direction = 0) {
     for (const gopStart of this._windowGopStarts(centerGopStart)) {
       if (gopStart === centerGopStart) continue
+      if (direction > 0 && gopStart < centerGopStart) continue
+      if (direction < 0 && gopStart > centerGopStart) continue
       // Checked per neighbour rather than once up front, so a source whose
       // GOPs are small enough still gets both of them prefetched while one
       // with long GOPs stops after whatever fits.
@@ -454,20 +510,7 @@ export class VideoFrameCache {
   // Index into presentationTimesUs of the last frame at or before targetUs,
   // or -1 if targetUs precedes the first frame.
   _timeIndexAtOrBefore(targetUs) {
-    const times = this.presentationTimesUs
-    let lo = 0
-    let hi = times.length - 1
-    let ans = -1
-    while (lo <= hi) {
-      const mid = (lo + hi) >> 1
-      if (times[mid] <= targetUs) {
-        ans = mid
-        lo = mid + 1
-      } else {
-        hi = mid - 1
-      }
-    }
-    return ans
+    return this._indexAtOrBefore(this.presentationTimesUs, targetUs)
   }
 
   // Which frame a given time sits on, snapped to the sample table.
@@ -515,11 +558,15 @@ export class VideoFrameCache {
     // because it's left over from a neighboring GOP kept around by the
     // prefetch window, not because it's actually the nearest one.
     const gopStartIndex = this._findGopStartIndex(targetUs)
+    // Infer travel direction from the previous request - see the comment on
+    // _prefetchAround for why this matters during a sustained REW/jog run.
+    const direction = this.lastRequestedUs == null ? 0 : Math.sign(targetUs - this.lastRequestedUs)
+    this.lastRequestedUs = targetUs
     this.currentGopStart = gopStartIndex
 
     await this._ensureGopDecoded(gopStartIndex)
     this._evictOutsideWindow(gopStartIndex)
-    this._prefetchAround(gopStartIndex)
+    this._prefetchAround(gopStartIndex, direction)
 
     return this._bestCachedFrame(targetUs) ?? this._earliestCachedFrame()
   }
@@ -528,6 +575,7 @@ export class VideoFrameCache {
     this.closed = true
     for (const frame of this.frames.values()) frame.close()
     this.frames.clear()
+    this.cachedTimestampsUs = []
     this.decodedGops.clear()
     this.pendingGops.clear()
     if (this.decoder && this.decoder.state !== 'closed') this.decoder.close()
