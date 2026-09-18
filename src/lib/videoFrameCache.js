@@ -90,7 +90,11 @@ function presentationOffsetTicks(mp4boxFile, trackId, movieTimescale, mediaTimes
   return 0
 }
 
-function demux(file) {
+// Exported for `test/videoFrameCache.demux.test.mjs`, which runs this against
+// a real B-frame fixture. Everything up to `VideoDecoder` is pure JS that
+// works under plain Node, so the demux half is testable without a browser -
+// worth keeping reachable, since it's the half that had a silent bug.
+export function demux(file) {
   return new Promise((resolve, reject) => {
     const mp4boxFile = createFile()
     let trackInfo = null

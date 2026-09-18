@@ -124,7 +124,10 @@ problem without touching the recorder/timeline deck at all.
   Since REW sets the clock from `frame.timestamp` and marks are taken from
   that clock, the offset would have landed marks a couple of frames away from
   what the ffmpeg export produces. Fixtures encoded here never caught it
-  because VP9 has no B-frames and so gets `media_time` 0.
+  because VP9 has no B-frames and so gets `media_time` 0, which is why
+  `test/fixtures/` now carries a real H.264 clip and
+  `test/videoFrameCache.demux.test.mjs` checks the demuxed timestamps
+  against `ffprobe`'s reading of it (`npm test`).
 - **Still proposed:** the recorder/timeline deck's `skip()` REW, and
   dropping the `<video>` fallback path entirely. Two open items from testing
   against real footage are written up in `TECHDEBT.md` under "Frame cache
