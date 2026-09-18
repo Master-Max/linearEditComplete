@@ -29,6 +29,32 @@ const CLOCK_UPDATE_INTERVAL_MS = 66
 // stepping around the current position rarely triggers a fresh decode.
 const PROXY_WINDOW_RADIUS_FRAMES = 15
 
+// The canvas is only ever displayed at a fixed 480x270 CSS box
+// (classic.css), regardless of source resolution - so drawing a source
+// frame onto it at full native resolution (REW/jog's frame-cache fallback
+// when no proxy exists, and every forward-canvas frame, which always draws
+// straight from <video> rather than the proxy - see startForwardCanvas)
+// is pure waste. Worse than waste for FF: that extra full-resolution
+// drawImage competes for the same thread <video>'s own decode needs to
+// sustain 4x, which is what turns "normal, then jumps to catch up" into a
+// visible pattern rather than an occasional dropped frame. Capped the same
+// way the REW proxy is (PROXY_MAX_WIDTH in useFFmpeg.js).
+const CANVAS_MAX_WIDTH = 960
+
+// Sizes canvas's backing buffer to fit sourceWidth/sourceHeight within
+// CANVAS_MAX_WIDTH, preserving aspect ratio and never upscaling - a no-op
+// once already sized right, so cheap to call on every drawn frame. Returns
+// false when there's nothing to draw yet (source has no known size).
+function fitCanvasToSource(canvas, sourceWidth, sourceHeight) {
+  if (!sourceWidth || !sourceHeight) return false
+  const scale = Math.min(1, CANVAS_MAX_WIDTH / sourceWidth)
+  const width = Math.round(sourceWidth * scale)
+  const height = Math.round(sourceHeight * scale)
+  if (canvas.width !== width) canvas.width = width
+  if (canvas.height !== height) canvas.height = height
+  return true
+}
+
 // Paints whatever <video> currently has decoded onto the canvas, best-
 // effort - used to avoid a flash of the canvas's own black background at
 // the instant it's swapped in for REW or forward playback. video.videoWidth
@@ -42,9 +68,8 @@ const PROXY_WINDOW_RADIUS_FRAMES = 15
 function paintCurrentVideoFrame(video, canvas, ctx) {
   if (!video || !canvas || !ctx || !video.videoWidth || video.readyState < video.HAVE_CURRENT_DATA) return
   try {
-    canvas.width = video.videoWidth
-    canvas.height = video.videoHeight
-    ctx.drawImage(video, 0, 0)
+    if (!fitCanvasToSource(canvas, video.videoWidth, video.videoHeight)) return
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
   } catch {
     // Best-effort - see comment above.
   }
@@ -316,11 +341,9 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip, 
       const stillRunning = !video.paused && !video.ended
       if (stillRunning) forwardRvfc.current = video.requestVideoFrameCallback(onFrame)
 
-      if (video.videoWidth) {
-        if (canvas.width !== video.videoWidth) canvas.width = video.videoWidth
-        if (canvas.height !== video.videoHeight) canvas.height = video.videoHeight
+      if (fitCanvasToSource(canvas, video.videoWidth, video.videoHeight)) {
         try {
-          ctx.drawImage(video, 0, 0)
+          ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
         } catch {
           // Not drawable this instant - keep the previous frame up rather
           // than blanking the canvas for one tick.
@@ -453,10 +476,8 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip, 
         return
       }
 
-      if (ctx) {
-        if (canvas.width !== frame.displayWidth) canvas.width = frame.displayWidth
-        if (canvas.height !== frame.displayHeight) canvas.height = frame.displayHeight
-        ctx.drawImage(frame, 0, 0)
+      if (ctx && fitCanvasToSource(canvas, frame.displayWidth, frame.displayHeight)) {
+        ctx.drawImage(frame, 0, 0, canvas.width, canvas.height)
         // Track the actual frame drawn, not the idealized continuous
         // `time` above - getFrameAtOrBefore returns the nearest frame AT
         // OR BEFORE that time, so the two can differ by up to one frame's
@@ -558,10 +579,8 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip, 
       }
       const canvas = canvasRef.current
       const ctx = canvas?.getContext('2d')
-      if (canvas && ctx) {
-        if (canvas.width !== frame.displayWidth) canvas.width = frame.displayWidth
-        if (canvas.height !== frame.displayHeight) canvas.height = frame.displayHeight
-        ctx.drawImage(frame, 0, 0)
+      if (canvas && ctx && fitCanvasToSource(canvas, frame.displayWidth, frame.displayHeight)) {
+        ctx.drawImage(frame, 0, 0, canvas.width, canvas.height)
         setIsCanvasActive(true)
       }
       const shownTime = frame.timestamp / 1e6
