@@ -131,25 +131,28 @@ export default function App() {
             Trim and stitch clips entirely on your device — powered by ffmpeg.wasm.
           </p>
         </div>
-        <div className="flex shrink-0 gap-1 rounded-lg bg-slate-100 p-1 text-sm">
-          <button
-            type="button"
-            onClick={() => switchLayout('modern')}
-            className={`rounded px-3 py-1 font-medium ${
-              layout === 'modern' ? 'bg-white shadow text-slate-800' : 'text-slate-500'
-            }`}
-          >
-            Modern
-          </button>
-          <button
-            type="button"
-            onClick={() => switchLayout('classic')}
-            className={`rounded px-3 py-1 font-medium ${
-              layout === 'classic' ? 'bg-white shadow text-slate-800' : 'text-slate-500'
-            }`}
-          >
-            Classic
-          </button>
+        <div className="flex shrink-0 flex-col items-end gap-1">
+          <div className="flex gap-1 rounded-lg bg-slate-100 p-1 text-sm">
+            <button
+              type="button"
+              onClick={() => switchLayout('modern')}
+              className={`rounded px-3 py-1 font-medium ${
+                layout === 'modern' ? 'bg-white shadow text-slate-800' : 'text-slate-500'
+              }`}
+            >
+              Modern
+            </button>
+            <button
+              type="button"
+              onClick={() => switchLayout('classic')}
+              className={`rounded px-3 py-1 font-medium ${
+                layout === 'classic' ? 'bg-white shadow text-slate-800' : 'text-slate-500'
+              }`}
+            >
+              Classic
+            </button>
+          </div>
+          <span className="text-xs text-slate-400">build {import.meta.env.VITE_COMMIT_HASH ?? 'dev'}</span>
         </div>
       </header>
 
@@ -198,10 +201,6 @@ export default function App() {
           <ExportPanel clips={clips} ffmpeg={ffmpeg} resolution={effectiveResolution} fitMode={fitMode} />
         </main>
       )}
-
-      <footer className="border-t border-slate-200 px-6 py-3 text-center text-xs text-slate-400">
-        build {import.meta.env.VITE_COMMIT_HASH ?? 'dev'}
-      </footer>
     </div>
   )
 }

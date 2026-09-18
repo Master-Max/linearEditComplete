@@ -127,6 +127,20 @@
   color: #808080;
 }
 
+.classic-editor .scrub-progress-track {
+  margin: 2px 4px 6px;
+  height: 4px;
+  border-radius: 2px;
+  background-color: #444444;
+  overflow: hidden;
+}
+
+.classic-editor .scrub-progress-fill {
+  height: 100%;
+  background-color: #ffcc00;
+  transition: width 0.15s linear;
+}
+
 .classic-editor #player,
 .classic-editor #recorder {
   background-color: #d0d0d0;
