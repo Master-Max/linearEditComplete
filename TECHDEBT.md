@@ -266,3 +266,68 @@ every canvas draw (FF/PLAY, REW, jog, and the pre-swap paint) to the same
 960px-wide budget the proxy uses, closing the gap between REW and FF's
 per-frame cost. Not independently verified against real H.264 playback for
 the same sandbox-codec-support reason noted above.
+
+## Scrub-proxy transcode is single-threaded - and the multi-threaded core needs a host GitHub Pages can't be
+
+**Where:** `src/hooks/useFFmpeg.js` (`load`, `loadCore`, `CORE_MT_BASE`),
+`vite.config.js` (`crossOriginIsolationHeaders`), `public/ffmpeg-mt/`
+
+Real-world measurement from a user's own footage: 443s to transcode a 594s
+(9.9 minute) source - about 1.34x realtime, which is a reasonable number for
+a single-threaded WASM x264 pipeline (full decode + downscale + all-intra
+re-encode) but still means REW/jog fall all the way back to `<video>`
+reseeking for several minutes on a source that length, since the frame cache
+only gets built once the transcode fully resolves (see "Transcode footage to
+an intra-frame proxy on load" above).
+
+ffmpeg.wasm ships a multi-threaded core (`@ffmpeg/core-mt`, same version as
+the single-threaded `@ffmpeg/core` already vendored) that can meaningfully
+cut that - but it needs `SharedArrayBuffer`, which only exists when the page
+is cross-origin isolated: `Cross-Origin-Opener-Policy: same-origin` and
+`Cross-Origin-Embedder-Policy: credentialless`/`require-corp` response
+headers. **GitHub Pages, this app's current deploy target
+(`.github/workflows/deploy.yml`), serves static files with fixed headers -
+there's no way to set custom response headers there.** Getting COOP/COEP on
+GitHub Pages at all means retrofitting it client-side via a service worker
+(the `coi-serviceworker` pattern), which is real, somewhat fragile
+infrastructure (typically needs a forced reload on first visit, adds a
+service-worker lifecycle to reason about) just to work around a hosting
+limitation.
+
+**The app-side work is done and shipped, gated so it's a strict enhancement:**
+`useFFmpeg.js`'s `load()` checks `window.crossOriginIsolated` and tries the
+multi-threaded core (`public/ffmpeg-mt/`, added via the `@ffmpeg/core-mt`
+devDependency) first when it's true, falling back to the single-threaded
+core (`public/ffmpeg/`) on any failure or when it's false - which is every
+GitHub Pages page load today, so behavior there is unchanged from before
+this existed. `vite.config.js` sets the COOP/COEP headers on Vite's own
+`server`/`preview` (local `npm run dev`/`npm run preview` only - this has no
+effect on the static files GitHub Pages actually serves) so the
+multi-threaded path can be exercised and verified locally.
+
+**Verified locally:** with the dev-server headers active,
+`window.crossOriginIsolated` and `SharedArrayBuffer` both reported true, the
+multi-threaded core loaded (including the pthread-worker wiring - `workerURL`
+in `FFMessageLoadConfig`, `mainScriptUrlOrBlob` propagation into spawned
+worker threads - confirmed by reading `@ffmpeg/ffmpeg`'s own worker.js
+rather than assumed), and `transcodeToIntraProxy` completed successfully.
+With the headers removed, `crossOriginIsolated` correctly reported false and
+the same transcode completed via the single-threaded fallback - confirming
+today's GitHub Pages behavior is unchanged.
+
+**Status:** open. **The actual fix is moving to a host that can set
+response headers - Vercel is the concrete candidate**, since it supports
+arbitrary headers on static deployments via a `vercel.json` `headers` config
+with no service-worker workaround needed. That's a real infra decision
+(moving off GitHub Pages: build config, any custom domain/DNS currently
+pointed at GH Pages, dropping or replacing the existing deploy workflow),
+deliberately not done as part of this entry - only the app-side capability
+to use a multi-threaded core once it's cross-origin isolated. The moment
+that migration happens, this lights up automatically; no further app code
+changes needed. Use `credentialless` rather than `require-corp` for the
+COEP header when that migration happens: `require-corp` requires every
+cross-origin resource the page loads to explicitly opt in via its own
+`Cross-Origin-Resource-Policy` header, which would block the `player.vimeo.com`
+iframe the "Load video from Vimeo" entry in ROADMAP.md proposes (Vimeo's
+player will never send that header); `credentialless` still gets
+cross-origin isolation without that constraint.

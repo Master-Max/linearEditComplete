@@ -15,6 +15,19 @@ function getCommitHash() {
   }
 }
 
+// Cross-origin isolation (COOP/COEP), so the multi-threaded ffmpeg.wasm
+// core (see useFFmpeg.js) can actually be exercised via `npm run dev` /
+// `npm run preview` - SharedArrayBuffer, which it needs, only exists on a
+// cross-origin-isolated page. This only configures Vite's own dev/preview
+// servers; it has no effect on the static files GitHub Pages serves in
+// production, which is why this alone doesn't turn multi-threading on for
+// deployed users - see the "scrub-proxy transcode is single-threaded" entry
+// in TECHDEBT.md for what actually would.
+const crossOriginIsolationHeaders = {
+  'Cross-Origin-Opener-Policy': 'same-origin',
+  'Cross-Origin-Embedder-Policy': 'credentialless',
+}
+
 // https://vite.dev/config/
 export default defineConfig({
   base: '/linearEditComplete/',
@@ -22,4 +35,6 @@ export default defineConfig({
   define: {
     'import.meta.env.VITE_COMMIT_HASH': JSON.stringify(getCommitHash()),
   },
+  server: { headers: crossOriginIsolationHeaders },
+  preview: { headers: crossOriginIsolationHeaders },
 })

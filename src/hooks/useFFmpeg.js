@@ -4,12 +4,25 @@ import { fetchFile, toBlobURL } from '@ffmpeg/util'
 import { buildFitFilter } from '../lib/resolution'
 import { clipLength } from '../lib/clip'
 
-// Self-hosted core (copied into public/ffmpeg) so nothing is fetched from a
-// third-party CDN and processing works fully offline after first load.
-// Resolved relative to the page (not window.location.origin) so it still
-// works when the app is served from a subpath, e.g. GitHub Pages project
-// sites at username.github.io/repo-name/.
+// Self-hosted cores (copied into public/ffmpeg and public/ffmpeg-mt) so
+// nothing is fetched from a third-party CDN and processing works fully
+// offline after first load. Resolved relative to the page (not
+// window.location.origin) so it still works when the app is served from a
+// subpath, e.g. GitHub Pages project sites at username.github.io/repo-name/.
 const CORE_BASE = `${import.meta.env.BASE_URL}ffmpeg`
+// Multi-threaded build of the same ffmpeg-core version - real transcode
+// speedup (see TECHDEBT.md's "scrub-proxy transcode is single-threaded"
+// entry for real-world numbers), but it needs SharedArrayBuffer, which only
+// exists when the page is cross-origin isolated (COOP/COEP response
+// headers). This app's current host, GitHub Pages, can't set those - see
+// the same TECHDEBT.md entry for what hosting that can would take. Until
+// then, isCrossOriginIsolated() below is always false here and load() just
+// uses CORE_BASE, exactly as before this existed.
+const CORE_MT_BASE = `${import.meta.env.BASE_URL}ffmpeg-mt`
+
+function isCrossOriginIsolated() {
+  return typeof window !== 'undefined' && window.crossOriginIsolated === true
+}
 
 // Widest the intra-frame scrub proxy (see transcodeToIntraProxy below) is
 // allowed to be. The player deck's canvas only ever displays it at 480x270
@@ -33,24 +46,50 @@ export function useFFmpeg() {
   const [statusText, setStatusText] = useState('')
   const [error, setError] = useState(null)
 
+  // Builds and loads one FFmpeg instance against `base`, registering the
+  // shared progress listener. `workerFile`, when given, also fetches and
+  // wires up ffmpeg-core.worker.js - the multi-threaded core's pthread
+  // worker (see FFMessageLoadConfig.workerURL) - which the single-threaded
+  // core doesn't have or need.
+  //
+  // The worker itself runs from a blob URL, and it can't cross into a
+  // same-origin-but-different-URL script via a plain <script>/import fetch
+  // from within that scope — so the core files must be pulled in as blob
+  // URLs too, even though they're already same-origin.
+  async function loadCore(base, { workerFile } = {}) {
+    const ffmpeg = new FFmpeg()
+    ffmpeg.on('progress', ({ progress: p }) => {
+      setProgress(Math.min(1, Math.max(0, p)))
+    })
+    const urls = [
+      toBlobURL(`${base}/ffmpeg-core.js`, 'text/javascript'),
+      toBlobURL(`${base}/ffmpeg-core.wasm`, 'application/wasm'),
+    ]
+    if (workerFile) urls.push(toBlobURL(`${base}/${workerFile}`, 'text/javascript'))
+    const [coreURL, wasmURL, workerURL] = await Promise.all(urls)
+    await ffmpeg.load(workerURL ? { coreURL, wasmURL, workerURL } : { coreURL, wasmURL })
+    return ffmpeg
+  }
+
   const load = useCallback(async () => {
     if (ffmpegRef.current) return ffmpegRef.current
     setLoading(true)
     setError(null)
     try {
-      const ffmpeg = new FFmpeg()
-      ffmpeg.on('progress', ({ progress: p }) => {
-        setProgress(Math.min(1, Math.max(0, p)))
-      })
-      // The worker itself runs from a blob URL, and it can't cross into a
-      // same-origin-but-different-URL script via a plain <script>/import
-      // fetch from within that scope — so the core files must be pulled in
-      // as blob URLs too, even though they're already same-origin.
-      const [coreURL, wasmURL] = await Promise.all([
-        toBlobURL(`${CORE_BASE}/ffmpeg-core.js`, 'text/javascript'),
-        toBlobURL(`${CORE_BASE}/ffmpeg-core.wasm`, 'application/wasm'),
-      ])
-      await ffmpeg.load({ coreURL, wasmURL })
+      let ffmpeg = null
+      if (isCrossOriginIsolated()) {
+        try {
+          ffmpeg = await loadCore(CORE_MT_BASE, { workerFile: 'ffmpeg-core.worker.js' })
+        } catch (err) {
+          // Cross-origin isolated but the multi-threaded core still failed
+          // to load (unexpected, but not a reason to fail outright) - fall
+          // through to the single-threaded core below like any other
+          // browser would.
+          console.warn('Multi-threaded ffmpeg core failed to load, falling back to single-threaded', err)
+        }
+      }
+      if (!ffmpeg) ffmpeg = await loadCore(CORE_BASE)
+
       ffmpegRef.current = ffmpeg
       setLoaded(true)
       return ffmpeg
