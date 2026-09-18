@@ -438,18 +438,31 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip }
   // in videoFrameCache.js) draws instantly instead of paying <video>'s own
   // seek latency - which matters most when jogging repeatedly, since each
   // press would otherwise be an independent reseek.
-  async function jog(step) {
+  async function jog(direction) {
     still() // bumps transportGeneration, stops any active REW/forward loop
     const myGeneration = transportGeneration.current
     const v = videoRef.current
     if (!v) return
-    const target = Math.max(0, Math.min(v.duration || Infinity, v.currentTime + step))
 
     const cache = frameCacheRef.current
     if (!cache) {
+      // No sample table to consult, so fall back to nudging the clock by an
+      // assumed frame duration. Inexact on anything that isn't ~30fps, but
+      // <video> has nothing better to offer here.
+      const target = Math.max(0, Math.min(v.duration || Infinity, v.currentTime + direction / 30))
       v.currentTime = target
       return
     }
+
+    // Ask the sample table which frame is actually adjacent rather than
+    // assuming a frame duration - see nextFrameTimeSeconds() in
+    // videoFrameCache.js for why guessing gets this wrong at every frame
+    // rate except exactly 30fps.
+    const from = v.currentTime
+    const target =
+      direction > 0 ? cache.nextFrameTimeSeconds(from) : cache.previousFrameTimeSeconds(from)
+    // Already sitting on the first or last frame - nothing to step to.
+    if (target == null) return
 
     try {
       const frame = await cache.getFrameAtOrBefore(target)
@@ -534,10 +547,10 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip }
           marksRef.current.markOut()
           break
         case 'jogLeft':
-          jog(-1 / 30)
+          jog(-1)
           break
         case 'jogRight':
-          jog(1 / 30)
+          jog(1)
           break
         default:
           break
@@ -669,11 +682,11 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip }
           <b className="light">JOG</b>
         </div>
         <div className="row">
-          <b onClick={() => jog(-1 / 30)} className={`switch${keyClass('jogLeft')}`}>
+          <b onClick={() => jog(-1)} className={`switch${keyClass('jogLeft')}`}>
             {'<'}
             {keyHint('jogLeft')}
           </b>
-          <b onClick={() => jog(1 / 30)} className={`switch${keyClass('jogRight')}`}>
+          <b onClick={() => jog(1)} className={`switch${keyClass('jogRight')}`}>
             {'>'}
             {keyHint('jogRight')}
           </b>

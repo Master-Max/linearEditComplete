@@ -36,6 +36,50 @@ import { createFile, DataStream, Endianness } from 'mp4box'
 // memory at once.
 const WINDOW_RADIUS_GOPS = 1
 
+// Tolerance when matching a time back to the frame it belongs to. Times make
+// a round trip through seconds and through <video>.currentTime between
+// leaving this cache and coming back, so they arrive slightly off; 1ms is far
+// below any real frame duration (a 240fps source is still 4.2ms) yet well
+// above that drift.
+const FRAME_MATCH_SLACK_US = 1000
+
+// How long to let a single GOP decode run before giving up on it.
+//
+// This is a deadlock guard, not a latency budget - it should never fire on a
+// decode that is merely slow. It matters because of how decode jobs are
+// chained: decodeQueue is reassigned to each new job, so a job that never
+// settles is one every later job waits on forever. The queue is fed by the
+// background prefetch as well as by direct requests, and nobody awaits a
+// prefetch, so a decode that stalls there is invisible until the next REW or
+// jog hangs behind it - with no error, no rejection, and so no fallback: the
+// deck just freezes with the video paused and the clock stopped. A decoder
+// can stall for reasons outside this module's control (notably backpressure
+// when too many decoded VideoFrames are still open - see "Frame cache decodes
+// a whole GOP before showing anything" in TECHDEBT.md), so the queue has to
+// be able to survive one. Rejecting turns a permanent silent freeze into a
+// caught error and a fall back to <video> reseeking.
+const DECODE_TIMEOUT_MS = 5000
+
+// Rough ceiling on how much decoded video the prefetch window may hold open,
+// in bytes of I420 (the cache keeps every VideoFrame in a GOP alive until the
+// whole GOP is evicted). Counted in bytes rather than frames because the
+// number that is safe depends entirely on resolution: 480p frames are ~615KB
+// and 1080p ones ~3.1MB, so a frame count generous enough to be useful at
+// 480p holds five times the memory at 1080p.
+//
+// This bounds the *prefetch* only - the GOP actually being asked for is
+// always decoded whole, since there is no way to answer the request
+// otherwise. It matters because GOP length is a property of the source, not
+// something this code picks: an encoder left to choose its own keyframes can
+// emit GOPs hundreds of frames long (see "Frame cache decodes a whole GOP
+// before showing anything" in TECHDEBT.md), and with a radius of one the
+// window is three of those at once. Beyond the memory, holding that many
+// decoded frames open risks starving the decoder's own buffer pool, which on
+// a hardware decoder is small and fixed - and a decoder starved that way
+// stops producing output rather than failing, which is the stall
+// DECODE_TIMEOUT_MS exists to break.
+const PREFETCH_BYTE_BUDGET = 256 * 1024 * 1024
+
 export function isFrameCacheSupported() {
   return typeof VideoDecoder !== 'undefined' && typeof EncodedVideoChunk !== 'undefined'
 }
@@ -145,7 +189,9 @@ export class VideoFrameCache {
     this.file = file
     this.windowRadiusGops = windowRadiusGops
     this.decoder = null
+    this.approximateFrameBytes = 0
     this.decodeOrderSamples = []
+    this.presentationTimesUs = [] // every frame's presentation time, ascending
     this.keyframeIndices = [] // sample index of each GOP's start, ascending
     this.keyframeTimesUs = [] // parallel to keyframeIndices
     this.currentGopStart = -1 // GOP most recently actually requested
@@ -171,7 +217,14 @@ export class VideoFrameCache {
     const support = await VideoDecoder.isConfigSupported(config)
     if (!support.supported) throw new Error(`unsupported codec config: ${track.codec}`)
 
+    // I420: one luma plane plus two half-resolution chroma planes.
+    this.approximateFrameBytes = Math.round(track.video.width * track.video.height * 1.5)
     this.decodeOrderSamples = decodeOrderSamples
+    // Every frame's presentation time, ascending. decodeOrderSamples is in
+    // decode order, which with B-frames is NOT presentation order, so this
+    // needs its own sorted copy - it's what lets a caller ask for the frame
+    // adjacent to a given time instead of guessing at a time offset.
+    this.presentationTimesUs = decodeOrderSamples.map((s) => s.presentationTimeUs).sort((a, b) => a - b)
     for (let i = 0; i < decodeOrderSamples.length; i++) {
       if (decodeOrderSamples[i].is_sync) {
         this.keyframeIndices.push(i)
@@ -309,9 +362,39 @@ export class VideoFrameCache {
     }
     if (this.closed) return
     this._throwIfDecoderBroken()
-    await this.decoder.flush()
+    await this._flushWithTimeout()
     this.activeDecodeTimestamps = null
     this.decodedGops.set(gopStartIndex, timestamps)
+  }
+
+  // decoder.flush(), but guaranteed to settle - see DECODE_TIMEOUT_MS.
+  //
+  // A timeout is recorded as fatal rather than left for the next call to
+  // retry. A decoder that has stalled once stalls again, and retrying would
+  // buy nothing while costing another DECODE_TIMEOUT_MS of frozen deck on
+  // every subsequent step. Marking it fatal makes every later call throw
+  // immediately, which is what gets the caller onto its <video> fallback and
+  // keeps REW and jog responsive - degraded, but working.
+  async _flushWithTimeout() {
+    let timer
+    try {
+      await Promise.race([
+        this.decoder.flush(),
+        new Promise((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error(`VideoFrameCache decode timed out after ${DECODE_TIMEOUT_MS}ms`)),
+            DECODE_TIMEOUT_MS,
+          )
+        }),
+      ])
+    } catch (err) {
+      if (!this.closed && !this.fatalError) {
+        this.fatalError = err instanceof Error ? err : new Error(String(err))
+      }
+      throw err
+    } finally {
+      clearTimeout(timer)
+    }
   }
 
   // Decodes a GOP if it isn't already decoded or already being decoded,
@@ -358,10 +441,67 @@ export class VideoFrameCache {
   _prefetchAround(centerGopStart) {
     for (const gopStart of this._windowGopStarts(centerGopStart)) {
       if (gopStart === centerGopStart) continue
+      // Checked per neighbour rather than once up front, so a source whose
+      // GOPs are small enough still gets both of them prefetched while one
+      // with long GOPs stops after whatever fits.
+      if (this.frames.size * this.approximateFrameBytes >= PREFETCH_BYTE_BUDGET) return
       this._ensureGopDecoded(gopStart).catch((err) => {
         console.warn('VideoFrameCache: background prefetch failed', err)
       })
     }
+  }
+
+  // Index into presentationTimesUs of the last frame at or before targetUs,
+  // or -1 if targetUs precedes the first frame.
+  _timeIndexAtOrBefore(targetUs) {
+    const times = this.presentationTimesUs
+    let lo = 0
+    let hi = times.length - 1
+    let ans = -1
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1
+      if (times[mid] <= targetUs) {
+        ans = mid
+        lo = mid + 1
+      } else {
+        hi = mid - 1
+      }
+    }
+    return ans
+  }
+
+  // Which frame a given time sits on, snapped to the sample table.
+  //
+  // A time that came from this cache has usually been round-tripped through
+  // seconds and through <video>.currentTime by the time it comes back, so it
+  // can land a hair either side of the frame it names. FRAME_MATCH_SLACK_US
+  // absorbs that; it's an order of magnitude below the shortest plausible
+  // frame duration, so it can't reach into a neighbouring frame.
+  _frameIndexAt(timeSeconds) {
+    return this._timeIndexAtOrBefore(Math.round(timeSeconds * 1e6) + FRAME_MATCH_SLACK_US)
+  }
+
+  // The presentation time of the frame immediately after / before the one
+  // containing the given time, or null at either end of the clip.
+  //
+  // Stepping a frame is a question about the sample table, not about time.
+  // A caller that instead nudges the clock by an assumed frame duration and
+  // asks for the frame at-or-before the result gets it wrong at every frame
+  // rate except exactly the one it assumed: a 1/30s nudge on 24fps footage
+  // lands short of the next frame and returns the frame it started on, so a
+  // forward jog does nothing at all, while on 60fps footage it clears two
+  // frames at once. Reading the neighbouring timestamp out of the table is
+  // right at any frame rate, variable ones included.
+  nextFrameTimeSeconds(fromTimeSeconds) {
+    const next = this._frameIndexAt(fromTimeSeconds) + 1
+    if (next >= this.presentationTimesUs.length) return null
+    return this.presentationTimesUs[next] / 1e6
+  }
+
+  previousFrameTimeSeconds(fromTimeSeconds) {
+    const previous = this._frameIndexAt(fromTimeSeconds) - 1
+    if (previous < 0) return null
+    return this.presentationTimesUs[previous] / 1e6
   }
 
   // Returns the decoded VideoFrame at or immediately before targetTimeSeconds,

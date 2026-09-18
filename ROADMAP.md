@@ -98,7 +98,13 @@ problem without touching the recorder/timeline deck at all.
   touches the decoder. The frame cache still earns its keep on REW and jog,
   where `<video>` genuinely can't help.
   JOG was also moved onto the cache
-  (`ClassicPlayerDeck.jsx`'s `jog()`), showing the decoded frame instantly
+  (`ClassicPlayerDeck.jsx`'s `jog()`), stepping by whatever frame the sample
+  table says is actually adjacent (`nextFrameTimeSeconds()` /
+  `previousFrameTimeSeconds()`) rather than by an assumed frame duration -
+  the first cut nudged the clock by a hardcoded 1/30s and asked for the frame
+  at or before the result, which is only correct at exactly 30fps and left
+  forward jog doing nothing at all on 24fps footage. It shows the decoded
+  frame instantly
   via canvas while `<video>`'s own (slower) seek catches up underneath,
   handing back to `<video>` once it does - guarded by a
   `transportGeneration` counter so a jog's async cleanup can't fire late and
