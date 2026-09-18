@@ -180,11 +180,19 @@ export function useFFmpeg() {
   // Deliberately not shared state (setProgress/setStatusText/setError) -
   // this runs in the background whenever a source loads, and shouldn't
   // make an unrelated Export click show a stale or confusing progress bar.
+  // `onProgress`, if given, gets this call's own 0-1 ratio via a listener
+  // scoped to this call alone (registered/unregistered around exec, not
+  // left on the shared FFmpeg instance) - the caller's UI updates without
+  // that instance's other listeners (e.g. exportSequence's) seeing it.
   const transcodeToIntraProxy = useCallback(
-    async (file) => {
+    async (file, { onProgress } = {}) => {
       const ffmpeg = ffmpegRef.current ?? (await load())
       const inputName = `proxy-src.${extensionOf(file.name)}`
       const outputName = 'proxy-out.mp4'
+      const handleProgress = onProgress
+        ? ({ progress: p }) => onProgress(Math.min(1, Math.max(0, p)))
+        : null
+      if (handleProgress) ffmpeg.on('progress', handleProgress)
       try {
         await ffmpeg.writeFile(inputName, await fetchFile(file))
         await ffmpeg.exec([
@@ -202,6 +210,7 @@ export function useFFmpeg() {
         const data = await ffmpeg.readFile(outputName)
         return new Blob([data.buffer], { type: 'video/mp4' })
       } finally {
+        if (handleProgress) ffmpeg.off('progress', handleProgress)
         await Promise.all([
           ffmpeg.deleteFile(inputName).catch(() => {}),
           ffmpeg.deleteFile(outputName).catch(() => {}),

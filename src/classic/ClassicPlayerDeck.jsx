@@ -75,6 +75,18 @@ function paintCurrentVideoFrame(video, canvas, ctx) {
   }
 }
 
+// Formats the scrub-proxy stat line ("File transcoded — 3.2s for 0.1 minute
+// video") - whole seconds once the wait is long enough that a decimal is
+// just noise, one decimal place below that so a short clip doesn't round to
+// a misleading "0s".
+function formatScrubPrepSeconds(seconds) {
+  return seconds >= 10 ? `${Math.round(seconds)}` : seconds.toFixed(1)
+}
+
+function formatMinutes(seconds) {
+  return (seconds / 60).toFixed(1)
+}
+
 // Maps each shortcut key to the switch it should visually "press" while
 // held, so keyboard use gets the same :active feedback as a mouse click.
 const KEY_ACTIONS = {
@@ -110,6 +122,11 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip, 
   const forwardRvfc = useRef(null)
   const frameCacheRef = useRef(null)
   const [isPreparingScrub, setIsPreparingScrub] = useState(false)
+  const [scrubPrepProgress, setScrubPrepProgress] = useState(0)
+  // Set once the proxy transcode finishes ({ seconds, sourceDuration }),
+  // so users can see roughly what the "Preparing fast scrub…" wait cost
+  // them - cleared on the next source load, alongside the other state above.
+  const [scrubPrepStats, setScrubPrepStats] = useState(null)
   // ffmpeg is a fresh object identity from useFFmpeg() on every render of
   // App - reading it through a ref (kept fresh every render, like marksRef
   // below) rather than depending on it directly keeps the cache-build
@@ -186,6 +203,8 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip, 
     frameCacheRef.current?.close()
     frameCacheRef.current = null
     setIsPreparingScrub(false)
+    setScrubPrepProgress(0)
+    setScrubPrepStats(null)
 
     async function buildCache() {
       if (!source?.file || !isFrameCacheSupported()) return
@@ -194,8 +213,16 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip, 
       const ffmpegApi = ffmpegRef.current
       if (ffmpegApi && !ffmpegApi.error) {
         setIsPreparingScrub(true)
+        const startedAt = performance.now()
         try {
-          proxyFile = await ffmpegApi.transcodeToIntraProxy(source.file)
+          proxyFile = await ffmpegApi.transcodeToIntraProxy(source.file, {
+            onProgress: (p) => {
+              if (!cancelled) setScrubPrepProgress(p)
+            },
+          })
+          if (!cancelled) {
+            setScrubPrepStats({ seconds: (performance.now() - startedAt) / 1000, sourceDuration: source.duration })
+          }
         } catch (err) {
           console.warn('Intra-frame scrub proxy failed, REW/jog will use the source GOPs', err)
         } finally {
@@ -710,7 +737,20 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip, 
         <b className={marks.outPoint < (source?.duration ?? 0) ? 'light lock' : 'light'}>OUT</b>
       </div>
       <div className="clock">{formatTimecode(marks.currentTime)}</div>
-      {isPreparingScrub && <p className="scrub-status">Preparing fast scrub…</p>}
+      {isPreparingScrub && (
+        <>
+          <p className="scrub-status">Preparing fast scrub…</p>
+          <div className="scrub-progress-track">
+            <div className="scrub-progress-fill" style={{ width: `${Math.round(scrubPrepProgress * 100)}%` }} />
+          </div>
+        </>
+      )}
+      {!isPreparingScrub && scrubPrepStats && (
+        <p className="scrub-status">
+          File transcoded — {formatScrubPrepSeconds(scrubPrepStats.seconds)}s for{' '}
+          {formatMinutes(scrubPrepStats.sourceDuration)} minute video
+        </p>
+      )}
 
       <div className="player-frame">
         {/* eslint-disable-next-line jsx-a11y/media-has-caption */}

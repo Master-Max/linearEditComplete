@@ -218,7 +218,13 @@ since a "GOP" is one frame and the same memory budget goes much further);
 `ffmpeg` unavailable or the transcode itself failing falls through to
 building the cache from the original file exactly as before this existed -
 the proxy is a strict enhancement, never a requirement. A
-"Preparing fast scrub…" label shows on the player deck while it runs.
+"Preparing fast scrub…" label and progress bar (driven by ffmpeg.wasm's own
+`progress` event, scoped to this call via `on`/`off` rather than the shared
+hook state `exportSequence` uses, so an unrelated Export click never sees a
+stray progress bar) show on the player deck while it runs, followed by a
+"File transcoded — Ns for M minute video" stat line once it finishes -
+visibility into what that wait actually costs, since it scales with source
+length/resolution and was otherwise invisible.
 
 **Verified:** the demux/cache-lookup logic against synthetic and real fixture
 data (`npm test`, including new tests for the binary-search/prefetch-
