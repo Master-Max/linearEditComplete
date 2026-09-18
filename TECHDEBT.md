@@ -133,9 +133,14 @@ aren't on it.
   walk runs off the front of it, which is a redesign of `_decodeGop` rather
   than a tweak.
 
-**Status:** open, but no longer able to fail silently. Found by testing against
-real footage rather than the synthetic fixtures used until now; those all had
-short, evenly spaced GOPs and so never exercised this.
+**Status:** open for the camera-original path, but no longer the common case -
+see "Transcode footage to an intra-frame proxy on load" below, which sidesteps
+this entirely for any source ffmpeg can transcode rather than fixing
+`_decodeGop` itself. Still exactly as described here for the fallback path
+(ffmpeg unavailable/fails), which builds the cache from the original file same
+as before the proxy existed. Originally found by testing against real footage
+rather than the synthetic fixtures used until then; those all had short,
+evenly spaced GOPs and so never exercised this.
 
 Two guards went in after a report of REW and jog dying outright on real
 footage:
@@ -182,3 +187,61 @@ playback moved onto this cache and its canvas rendering:
 
 None of this touches the whole-GOP-decode-before-first-frame cost above,
 which is still open.
+
+## Transcode footage to an intra-frame proxy on load
+
+**Where:** `src/hooks/useFFmpeg.js` (`transcodeToIntraProxy`),
+`src/classic/ClassicPlayerDeck.jsx` (the cache-build effect)
+
+The GOP-decode-latency problem above is architectural: as long as REW/jog
+build their frame cache from the camera-original file, a GOP can be however
+long the source's own encoder chose to make it (real footage measured up to
+480 frames). Rather than redesigning `_decodeGop` to decode partial/bounded
+ranges, this sidesteps the problem the way professional NLEs do: transcode to
+an all-intra proxy on load and build the frame cache from that instead. Every
+output frame is independently decodable, so a GOP there is exactly one frame,
+regardless of the source - `getFrameAtOrBefore()`'s whole-GOP-before-first-
+frame cost collapses from "however long the source's GOP is" to "one frame."
+
+`transcodeToIntraProxy` runs `-g 1 -bf 0` (GOP-of-1, no B-frames - so no
+reorder delay, so no edit-list handling needed for the proxy's own
+timestamps), `-an` (nothing that reads from this proxy plays audio - REW
+pauses `<video>`, jog shows one still frame, and PLAY/FF never touch this
+proxy at all), and downscales to `PROXY_MAX_WIDTH` (960px) since the canvas
+that displays it is a fixed 480x270 CSS box (`classic.css`) - decoding and
+holding full source resolution for that would be pure waste. Runs through the
+same ffmpeg.wasm Worker already used for export, so it doesn't block the main
+thread. `ClassicPlayerDeck`'s cache-build effect now tries this first and
+builds `VideoFrameCache` from the proxy (with a much wider
+`PROXY_WINDOW_RADIUS_FRAMES` retained window than the original-file default,
+since a "GOP" is one frame and the same memory budget goes much further);
+`ffmpeg` unavailable or the transcode itself failing falls through to
+building the cache from the original file exactly as before this existed -
+the proxy is a strict enhancement, never a requirement. A
+"Preparing fast scrub…" label shows on the player deck while it runs.
+
+**Verified:** the demux/cache-lookup logic against synthetic and real fixture
+data (`npm test`, including new tests for the binary-search/prefetch-
+direction changes above). The transcode command itself was run end-to-end
+through the real app's ffmpeg.wasm in a real browser against the committed
+H.264 fixture (not mocked): the output demuxed with every one of 120 samples
+`is_sync` (confirming GOP-of-1), correct frame count, and clean non-reordered
+timestamps.
+
+**Not verified:** actual on-screen REW/jog rendering from a proxy in a
+browser. This sandbox's Chromium build has no H.264 decode support at all -
+not `<video>`, not `VideoDecoder.isConfigSupported()` - so `loadVideoSource`
+itself never resolves for an H.264 fixture here, independent of anything in
+this change (see the VP9-only note under "Frame cache decodes a whole GOP..."
+above, which hit the same wall for the original feature). Worth a manual
+pass in a real H.264-capable browser before calling this done.
+
+**Possible follow-ups, not implemented:**
+- Transcoding the whole clip up front means a long source takes a while
+  before REW/jog get fast - during that window they use whatever the
+  fallback path gets (proxy-less cache, or `<video>` reseeking). Transcoding
+  only a window around the current playhead, expanding lazily, would bound
+  that wait but is meaningfully more complex.
+- The proxy is held as an in-memory `Blob`. Fine at the current scale; OPFS
+  (Origin Private File System) would matter if proxies for very long/large
+  sources became a real memory concern.

@@ -121,6 +121,12 @@
   letter-spacing: 1px;
 }
 
+.classic-editor .scrub-status {
+  margin: 0 4px 4px;
+  font-size: 11px;
+  color: #808080;
+}
+
 .classic-editor #player,
 .classic-editor #recorder {
   background-color: #d0d0d0;
