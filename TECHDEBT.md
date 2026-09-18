@@ -315,19 +315,26 @@ With the headers removed, `crossOriginIsolated` correctly reported false and
 the same transcode completed via the single-threaded fallback - confirming
 today's GitHub Pages behavior is unchanged.
 
-**Status:** open. **The actual fix is moving to a host that can set
-response headers - Vercel is the concrete candidate**, since it supports
-arbitrary headers on static deployments via a `vercel.json` `headers` config
-with no service-worker workaround needed. That's a real infra decision
-(moving off GitHub Pages: build config, any custom domain/DNS currently
-pointed at GH Pages, dropping or replacing the existing deploy workflow),
-deliberately not done as part of this entry - only the app-side capability
-to use a multi-threaded core once it's cross-origin isolated. The moment
-that migration happens, this lights up automatically; no further app code
-changes needed. Use `credentialless` rather than `require-corp` for the
-COEP header when that migration happens: `require-corp` requires every
-cross-origin resource the page loads to explicitly opt in via its own
-`Cross-Origin-Resource-Policy` header, which would block the `player.vimeo.com`
-iframe the "Load video from Vimeo" entry in ROADMAP.md proposes (Vimeo's
-player will never send that header); `credentialless` still gets
-cross-origin isolation without that constraint.
+**Status:** in progress - Vercel connected. `vercel.json` sets the same
+`credentialless` COOP/COEP headers as the local dev server (see above for why
+`credentialless` over `require-corp`), which is the piece GitHub Pages
+couldn't do and the actual point of this move.
+
+That surfaced a second, unrelated bug on first deploy: `vite.config.js` had
+`base: '/linearEditComplete/'` hardcoded for GitHub Pages' project-site path
+(`username.github.io/linearEditComplete/`) - every built `<script>`/`<link>`
+tag carried that prefix, which 404s at Vercel's domain root and renders a
+blank page (no visible error - React just never mounts). Fixed by branching
+on `process.env.VERCEL`, which Vercel sets automatically in its build
+environment: GitHub Pages' own build (no `VERCEL` env var) is unaffected,
+confirmed by diffing `dist/index.html`'s asset URLs before/after with and
+without `VERCEL=1` set locally, and by serving a `VERCEL=1` build from a
+plain static server at its root and confirming the app actually renders
+(both `/` and `/classic`) rather than trusting the build output alone.
+
+Still open: GitHub Pages itself hasn't been decommissioned or replaced in
+`.github/workflows/deploy.yml` - both hosts are live right now, GitHub Pages
+still single-threaded (as designed - no COOP/COEP there), Vercel newly
+multi-threaded. Whether GitHub Pages stays as a fallback, gets replaced
+outright, or any custom domain moves over is a decision for whoever's
+driving the migration, not made here.

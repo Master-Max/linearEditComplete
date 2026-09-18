@@ -28,9 +28,18 @@ const crossOriginIsolationHeaders = {
   'Cross-Origin-Embedder-Policy': 'credentialless',
 }
 
+// GitHub Pages serves this as a project site (username.github.io/repo-name/),
+// so every asset URL needs that path prefix - but Vercel serves the same
+// build from its domain root, where that prefix would just 404 every script
+// and stylesheet tag (a blank page, not a visible error). Vercel sets
+// VERCEL=1 in its build environment automatically, so this needs no
+// per-target configuration - the same `vite build` picks the right base for
+// whichever host actually ran it.
+const isVercel = process.env.VERCEL === '1'
+
 // https://vite.dev/config/
 export default defineConfig({
-  base: '/linearEditComplete/',
+  base: isVercel ? '/' : '/linearEditComplete/',
   plugins: [react(), tailwindcss()],
   define: {
     'import.meta.env.VITE_COMMIT_HASH': JSON.stringify(getCommitHash()),
