@@ -112,6 +112,8 @@ export class VideoFrameCache {
     this.pendingGops = new Map() // gopStartIndex -> in-flight decode Promise
     this.decodeQueue = Promise.resolve() // serializes decode+flush jobs on the single decoder
     this.activeDecodeTimestamps = null // set while a decode job is running; output() pushes here
+    this.closed = false // close() ran - teardown, nobody is waiting on results
+    this.fatalError = null // the decoder died on its own - callers still want to know
   }
 
   async init() {
@@ -141,7 +143,15 @@ export class VideoFrameCache {
         this.frames.set(frame.timestamp, frame)
         this.activeDecodeTimestamps?.push(frame.timestamp)
       },
-      error: (err) => console.error('VideoFrameCache decode error', err),
+      // WebCodecs closes the decoder when it errors, so the cache is dead
+      // from here on. Recording that is what lets _throwIfDecoderBroken
+      // tell this apart from our own close() and keep reporting failures
+      // to callers, who fall back to <video> reseeking rather than sitting
+      // on a cache that will now silently never produce another frame.
+      error: (err) => {
+        this.fatalError = err instanceof Error ? err : new Error(String(err))
+        console.error('VideoFrameCache decode error', err)
+      },
     })
     this.decoder.configure(config)
   }
@@ -207,17 +217,28 @@ export class VideoFrameCache {
     return bestKey === Infinity ? null : this.frames.get(bestKey)
   }
 
+  // Two very different reasons the decoder can stop being usable, which
+  // must NOT be treated the same way:
+  //
+  // - close() ran (source changed, component unmounted). Nothing is waiting
+  //   on this result - whoever asked is already being no-op'd by the
+  //   caller's own generation check - so bailing quietly is correct.
+  // - the decoder died on its own. WebCodecs closes a decoder when it hits
+  //   an error, so this looks identical from decoder.state alone, but here
+  //   the caller very much does still want an answer and has a working
+  //   fallback (<video> reseeking) ready for exactly this. Bailing quietly
+  //   here instead strands it: getFrameAtOrBefore resolves to null forever,
+  //   REW draws nothing and freezes rather than falling back.
+  _throwIfDecoderBroken() {
+    if (this.fatalError) throw this.fatalError
+    if (this.decoder.state !== 'configured') {
+      throw new Error(`VideoFrameCache decoder is '${this.decoder.state}', not usable`)
+    }
+  }
+
   async _decodeGop(gopStartIndex) {
-    // close() (called whenever the consuming component's source changes or
-    // unmounts) can land while this job is queued behind another one, or
-    // even mid-loop below - decoder.decode()/flush() throw synchronously
-    // once the decoder is no longer 'configured', which without this guard
-    // surfaces as an uncaught console error even though the caller (a
-    // superseded getFrameAtOrBefore call) is already about to no-op it via
-    // the transportGeneration check. Bailing out silently here is exactly
-    // as valid an outcome as decoding successfully would have been - the
-    // result is simply not needed anymore either way.
-    if (this.decoder.state !== 'configured') return
+    if (this.closed) return
+    this._throwIfDecoderBroken()
 
     let endIndex = gopStartIndex + 1
     while (endIndex < this.decodeOrderSamples.length && !this.decodeOrderSamples[endIndex].is_sync) {
@@ -232,7 +253,8 @@ export class VideoFrameCache {
     this.activeDecodeTimestamps = timestamps
 
     for (let i = gopStartIndex; i < endIndex; i++) {
-      if (this.decoder.state !== 'configured') return // closed partway through
+      if (this.closed) return
+      this._throwIfDecoderBroken()
       const s = this.decodeOrderSamples[i]
       this.decoder.decode(
         new EncodedVideoChunk({
@@ -243,7 +265,8 @@ export class VideoFrameCache {
         }),
       )
     }
-    if (this.decoder.state !== 'configured') return
+    if (this.closed) return
+    this._throwIfDecoderBroken()
     await this.decoder.flush()
     this.activeDecodeTimestamps = null
     this.decodedGops.set(gopStartIndex, timestamps)
@@ -320,6 +343,7 @@ export class VideoFrameCache {
   }
 
   close() {
+    this.closed = true
     for (const frame of this.frames.values()) frame.close()
     this.frames.clear()
     this.decodedGops.clear()

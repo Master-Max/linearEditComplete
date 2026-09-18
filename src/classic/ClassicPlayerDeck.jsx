@@ -359,7 +359,18 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip }
       }
       if (transportGeneration.current !== myGeneration) return // superseded while decoding
 
-      if (frame && ctx) {
+      if (!frame) {
+        // The cache resolved but had nothing to give. Anything that gets us
+        // here is not going to fix itself on the next tick, and continuing
+        // would just leave REW visibly frozen on the last drawn frame -
+        // hand over to the reseek loop, which needs nothing from the cache.
+        console.warn('Frame cache returned no frame for REW, falling back to reseeking')
+        stopCanvasRewind()
+        startReseekRewind()
+        return
+      }
+
+      if (ctx) {
         if (canvas.width !== frame.displayWidth) canvas.width = frame.displayWidth
         if (canvas.height !== frame.displayHeight) canvas.height = frame.displayHeight
         ctx.drawImage(frame, 0, 0)
