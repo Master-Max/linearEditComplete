@@ -80,6 +80,29 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip }
   // and every transport falls back to driving <video> directly, as before
   // this cache existed.
   useEffect(() => {
+    // The <video> element itself remounts on source change (it's keyed by
+    // source?.id), but this component doesn't - so the "cancel everything
+    // on unmount" effect below never fires here, and without this, an
+    // active REW/PLAY/FF/jog loop from the previous source would keep
+    // running (its scheduling refs untouched) right through an EJECT or a
+    // new LOAD. Bumping the generation is what actually matters: it makes
+    // any in-flight step()/onFrame() call (mid-await on a decode from the
+    // frame cache that's about to be closed below) a safe no-op instead of
+    // it running to completion against a source that no longer applies -
+    // same protection as every other transport action gets, just triggered
+    // by a prop change instead of a button press. The cancel calls below
+    // are best-effort on top of that (harmless if they end up targeting a
+    // freshly-remounted <video> rather than the one that scheduled them).
+    transportGeneration.current++
+    clearInterval(rewindTimer.current)
+    cancelAnimationFrame(rewindRaf.current)
+    rewindRaf.current = null
+    if (forwardRvfc.current != null) {
+      videoRef.current?.cancelVideoFrameCallback?.(forwardRvfc.current)
+      forwardRvfc.current = null
+    }
+    setIsCanvasActive(false)
+
     let cancelled = false
     frameCacheRef.current?.close()
     frameCacheRef.current = null
