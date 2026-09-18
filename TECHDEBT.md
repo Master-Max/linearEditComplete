@@ -245,3 +245,18 @@ pass in a real H.264-capable browser before calling this done.
 - The proxy is held as an in-memory `Blob`. Fine at the current scale; OPFS
   (Origin Private File System) would matter if proxies for very long/large
   sources became a real memory concern.
+
+A follow-up fixed a real asymmetry this left: REW/jog draw from the (already
+downscaled-to-960px) proxy, but FF/PLAY's forward-canvas loop
+(`startForwardCanvas` in `ClassicPlayerDeck.jsx`) deliberately never touches
+the proxy - it draws directly from `<video>` every displayed frame (see the
+comment there on why). That `drawImage` was happening at the source's full
+native resolution regardless, even though the canvas is only ever shown at a
+fixed 480x270 CSS box. On a high-resolution source that's real work
+competing with `<video>`'s own decode for the same thread at 4x, and was
+reported as FF staying "normal for a while, then jumping ahead to catch up"
+after the REW fixes above had already landed. `fitCanvasToSource()` now caps
+every canvas draw (FF/PLAY, REW, jog, and the pre-swap paint) to the same
+960px-wide budget the proxy uses, closing the gap between REW and FF's
+per-frame cost. Not independently verified against real H.264 playback for
+the same sandbox-codec-support reason noted above.
