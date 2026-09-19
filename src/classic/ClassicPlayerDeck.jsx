@@ -29,6 +29,25 @@ const CLOCK_UPDATE_INTERVAL_MS = 66
 // stepping around the current position rarely triggers a fresh decode.
 const PROXY_WINDOW_RADIUS_FRAMES = 15
 
+// Skip the automatic scrub-proxy transcode for sources past either cap,
+// falling straight through to the existing graceful-degradation path
+// (cache from the original file, or <video> reseeking) instead of
+// attempting it - same as ffmpeg being unavailable.
+//
+// The transcode is unconditional and uninvited: it starts the moment any
+// source loads, with nothing to cancel it (ffmpeg.wasm exposes no way to
+// actually stop in-flight work short of terminating the whole worker -
+// see "Scrub-proxy transcode has no size guard or cancellation" in
+// TECHDEBT.md). A real-world 9.9-minute source measured at 443s
+// single-threaded on capable hardware (see "Scrub-proxy transcode is
+// single-threaded..." in TECHDEBT.md); a long or high-resolution source on
+// a weaker mobile CPU is proportionally worse, and was reported freezing
+// the page outright on Android. Both thresholds are independent - either
+// one being over is enough to skip - since a short but very high-bitrate/
+// resolution clip can cost as much to decode as a long, modest one.
+const PROXY_MAX_SOURCE_DURATION_SECONDS = 180
+const PROXY_MAX_SOURCE_BYTES = 250 * 1024 * 1024
+
 // The canvas is only ever displayed at a fixed 480x270 CSS box
 // (classic.css), regardless of source resolution - so drawing a source
 // frame onto it at full native resolution (REW/jog's frame-cache fallback
@@ -127,6 +146,10 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip, 
   // so users can see roughly what the "Preparing fast scrub…" wait cost
   // them - cleared on the next source load, alongside the other state above.
   const [scrubPrepStats, setScrubPrepStats] = useState(null)
+  // True when the source tripped PROXY_MAX_SOURCE_DURATION_SECONDS/BYTES -
+  // shown so a large source silently getting slower REW/jog doesn't read as
+  // a bug.
+  const [scrubProxySkippedForSize, setScrubProxySkippedForSize] = useState(false)
   // ffmpeg is a fresh object identity from useFFmpeg() on every render of
   // App - reading it through a ref (kept fresh every render, like marksRef
   // below) rather than depending on it directly keeps the cache-build
@@ -205,13 +228,18 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip, 
     setIsPreparingScrub(false)
     setScrubPrepProgress(0)
     setScrubPrepStats(null)
+    setScrubProxySkippedForSize(false)
 
     async function buildCache() {
       if (!source?.file || !isFrameCacheSupported()) return
 
       let proxyFile = null
       const ffmpegApi = ffmpegRef.current
-      if (ffmpegApi && !ffmpegApi.error) {
+      const sourceTooBigToTranscode =
+        (source.duration ?? 0) > PROXY_MAX_SOURCE_DURATION_SECONDS ||
+        source.file.size > PROXY_MAX_SOURCE_BYTES
+      if (sourceTooBigToTranscode) setScrubProxySkippedForSize(true)
+      if (ffmpegApi && !ffmpegApi.error && !sourceTooBigToTranscode) {
         setIsPreparingScrub(true)
         const startedAt = performance.now()
         try {
@@ -750,6 +778,9 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip, 
           File transcoded — {formatScrubPrepSeconds(scrubPrepStats.seconds)}s for{' '}
           {formatMinutes(scrubPrepStats.sourceDuration)} minute video
         </p>
+      )}
+      {scrubProxySkippedForSize && (
+        <p className="scrub-status">Fast scrub skipped for this large a video — REW/jog will be slower</p>
       )}
 
       <div className="player-frame">

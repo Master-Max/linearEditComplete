@@ -338,3 +338,51 @@ still single-threaded (as designed - no COOP/COEP there), Vercel newly
 multi-threaded. Whether GitHub Pages stays as a fallback, gets replaced
 outright, or any custom domain moves over is a decision for whoever's
 driving the migration, not made here.
+
+## Scrub-proxy transcode has no size guard or cancellation
+
+**Where:** `src/classic/ClassicPlayerDeck.jsx`
+(`PROXY_MAX_SOURCE_DURATION_SECONDS`, `PROXY_MAX_SOURCE_BYTES`,
+`sourceTooBigToTranscode`), `src/hooks/useFFmpeg.js` (`transcodeToIntraProxy`)
+
+Reported directly: on Android Chrome, uploading a long/high-resolution video
+on the Vercel deployment froze the page. The scrub-proxy transcode starts
+unconditionally the moment any source loads - full decode, downscale, and
+all-intra re-encode, entirely uninvited - with nothing sized against the
+source first. A real-world 9.9-minute source measured 443s single-threaded
+on capable hardware (see the entry above); a long or high-resolution source
+on a weaker mobile CPU is proportionally worse, and apparently bad enough to
+read as a freeze rather than just a long wait.
+
+**Fix applied:** `ClassicPlayerDeck.jsx` now skips attempting the transcode
+- falling straight through to the existing graceful-degradation path (cache
+from the original file, or `<video>` reseeking, exactly as when ffmpeg is
+unavailable) - when the source's duration exceeds
+`PROXY_MAX_SOURCE_DURATION_SECONDS` (180s) or its file size exceeds
+`PROXY_MAX_SOURCE_BYTES` (250MB). Either threshold alone is enough to skip,
+since a short but very high-bitrate/resolution clip can cost as much to
+decode as a long, modest one. A "Fast scrub skipped for this large a video"
+message shows so degraded REW/jog doesn't read as a bug. Verified locally:
+faking a source's reported duration past the cap skips the transcode
+entirely (no "Preparing fast scrub…", no ffmpeg work started) and shows the
+skip message; a normal short source is unaffected.
+
+**Not fixed, and harder than it looks:** there's still no way to cancel an
+*already-started* transcode - e.g. a source just under the cap that still
+takes a while, where the user picks a different video or ejects mid-
+transcode. `ffmpeg.exec`/`writeFile`/`readFile` all accept an `AbortSignal`,
+but it only rejects the JS-side promise; it does not stop the underlying
+WASM work actually running in the worker, which keeps consuming CPU/memory
+regardless. The only real way to reclaim that is `ffmpeg.terminate()`,
+which kills the whole worker - and `useFFmpeg.js` shares one `FFmpeg`
+instance between this transcode and `exportSequence`, so terminating it
+from `ClassicPlayerDeck` while an unrelated export happened to be running
+would break that export too. Doing this properly needs either separate
+FFmpeg instances per use (more memory, another ~30MB core load) or some
+form of coordination between the two - deliberately not attempted here
+given the size guard above already prevents the reported failure.
+
+**Status:** the reported crash should be fixed; real-world confirmation
+(does a large mobile video now degrade gracefully instead of freezing)
+is still needed. The thresholds are round-number heuristics, not measured
+against real mobile hardware - may need tuning once there's field data.
