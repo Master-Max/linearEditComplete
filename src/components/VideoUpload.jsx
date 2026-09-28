@@ -1,11 +1,11 @@
 import { useRef } from 'react'
-import { loadVideoSource } from '../lib/loadVideoSource'
+import { isMediaFile, loadVideoSource } from '../lib/loadVideoSource'
 
 export default function VideoUpload({ onAdd }) {
   const inputRef = useRef(null)
 
   async function handleFiles(fileList) {
-    const files = Array.from(fileList).filter((f) => f.type.startsWith('video/'))
+    const files = Array.from(fileList).filter(isMediaFile)
     const results = await Promise.allSettled(files.map(loadVideoSource))
     for (const result of results) {
       if (result.status === 'fulfilled') {
@@ -26,7 +26,7 @@ export default function VideoUpload({ onAdd }) {
       }}
     >
       <p className="text-sm text-slate-600">
-        Drag video files here, or{' '}
+        Drag video or audio files here, or{' '}
         <button
           type="button"
           className="font-medium text-indigo-600 hover:underline"
@@ -41,7 +41,7 @@ export default function VideoUpload({ onAdd }) {
       <input
         ref={inputRef}
         type="file"
-        accept="video/*"
+        accept="video/*,audio/*"
         multiple
         className="hidden"
         onChange={(e) => handleFiles(e.target.files)}

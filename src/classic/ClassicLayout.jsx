@@ -15,6 +15,12 @@ export default function ClassicLayout({
   onAddClip,
   onRemoveClip,
   onMoveClip,
+  audioClips,
+  onAddAudioClip,
+  onRemoveAudioClip,
+  onMoveAudioClip,
+  keepClipAudio,
+  onKeepClipAudioChange,
   ffmpeg,
   projectResolution,
   onResolutionChange,
@@ -23,6 +29,11 @@ export default function ClassicLayout({
   onFitModeChange,
 }) {
   const fileInputRef = useRef(null)
+  // The player deck is built around a picture - its REW/jog frame cache and
+  // scrub proxy both decode video - so an audio-only source (loadable from
+  // the Modern layout) is treated as an empty deck here rather than fed
+  // through all of that.
+  const deckSource = selectedSource?.kind === 'audio' ? null : selectedSource
 
   async function handleLoadFiles(fileList) {
     const file = Array.from(fileList).find((f) => f.type.startsWith('video/'))
@@ -48,14 +59,24 @@ export default function ClassicLayout({
 
       <div id="monitors" className="flexy">
         <ClassicPlayerDeck
-          source={selectedSource}
+          source={deckSource}
           onLoad={() => fileInputRef.current?.click()}
           onEject={() => onSelectSource(null)}
           onAddClip={onAddClip}
+          onAddAudioClip={onAddAudioClip}
           ffmpeg={ffmpeg}
         />
-        <ClassicEditorConsole clips={clips} onRemove={onRemoveClip} onMove={onMoveClip} />
-        <ClassicRecorderDeck clips={clips} fitMode={fitMode} />
+        <ClassicEditorConsole
+          clips={clips}
+          onRemove={onRemoveClip}
+          onMove={onMoveClip}
+          audioClips={audioClips}
+          onRemoveAudio={onRemoveAudioClip}
+          onMoveAudio={onMoveAudioClip}
+          keepClipAudio={keepClipAudio}
+          onKeepClipAudioChange={onKeepClipAudioChange}
+        />
+        <ClassicRecorderDeck clips={clips} audioClips={audioClips} keepClipAudio={keepClipAudio} fitMode={fitMode} />
       </div>
 
       <input
@@ -68,7 +89,14 @@ export default function ClassicLayout({
 
       <div id="controls">
         <div className="export-wrap">
-          <ExportPanel clips={clips} ffmpeg={ffmpeg} resolution={resolution} fitMode={fitMode} />
+          <ExportPanel
+            clips={clips}
+            audioClips={audioClips}
+            keepClipAudio={keepClipAudio}
+            ffmpeg={ffmpeg}
+            resolution={resolution}
+            fitMode={fitMode}
+          />
         </div>
       </div>
     </div>

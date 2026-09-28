@@ -113,7 +113,7 @@ const ACTION_KEY_LABELS = {
   jogRight: '>',
 }
 
-export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip, ffmpeg }) {
+export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip, onAddAudioClip, ffmpeg }) {
   const videoRef = useRef(null)
   const canvasRef = useRef(null)
   const marks = usePlayerMarks(videoRef, source)
@@ -631,9 +631,9 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip, 
     }
   }
 
-  function addToTimeline() {
+  function addToTimeline(addToTrack = onAddClip) {
     if (!source || marks.outPoint <= marks.inPoint) return
-    onAddClip({
+    addToTrack({
       sourceId: source.id,
       sourceName: source.name,
       file: source.file,
@@ -841,11 +841,19 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip, 
       <div className="center-div">
         <div className="row">
           <b
-            onClick={addToTimeline}
+            onClick={() => addToTimeline()}
             className="switch switch-big red-button"
             style={{ opacity: source && marks.outPoint > marks.inPoint ? 1 : 0.4 }}
           >
             ADD TO TIMELINE
+          </b>
+          {/* Lifts just the marked range's sound onto the audio track. */}
+          <b
+            onClick={() => addToTimeline(onAddAudioClip)}
+            className="switch grey-button"
+            style={{ opacity: source && marks.outPoint > marks.inPoint ? 1 : 0.4 }}
+          >
+            ADD AUDIO
           </b>
         </div>
       </div>

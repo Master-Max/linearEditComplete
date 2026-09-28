@@ -1,6 +1,6 @@
 import { useState } from 'react'
 
-export default function ExportPanel({ clips, ffmpeg, resolution, fitMode }) {
+export default function ExportPanel({ clips, audioClips, keepClipAudio, ffmpeg, resolution, fitMode }) {
   const [resultUrl, setResultUrl] = useState(null)
   const [exporting, setExporting] = useState(false)
 
@@ -15,6 +15,8 @@ export default function ExportPanel({ clips, ffmpeg, resolution, fitMode }) {
         width: resolution?.width,
         height: resolution?.height,
         fitMode,
+        audioClips,
+        keepClipAudio,
       })
       setResultUrl(url)
     } catch {

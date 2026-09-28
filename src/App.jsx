@@ -16,11 +16,23 @@ import { useFFmpeg } from './hooks/useFFmpeg'
 import { useToasts } from './hooks/useToasts'
 import { getLayoutFromLocation, navigateToLayout } from './lib/route'
 
+function moveItem(list, from, to) {
+  const next = [...list]
+  const [moved] = next.splice(from, 1)
+  next.splice(to, 0, moved)
+  return next
+}
+
 export default function App() {
   const [layout, setLayout] = useState(() => getLayoutFromLocation())
   const [sources, setSources] = useState([])
   const [selectedSourceId, setSelectedSourceId] = useState(null)
   const [clips, setClips] = useState([])
+  // The audio track: clips laid end to end from 0:00 under the video track,
+  // independent of where the video cuts fall. Mixed with the video clips'
+  // own sound, or replacing it when keepClipAudio is off.
+  const [audioClips, setAudioClips] = useState([])
+  const [keepClipAudio, setKeepClipAudio] = useState(true)
   const [projectResolution, setProjectResolution] = useState({ mode: 'auto', width: null, height: null })
   const [fitMode, setFitMode] = useState('letterbox')
   const [mismatchNotice, setMismatchNotice] = useState(null)
@@ -33,7 +45,7 @@ export default function App() {
     if (projectResolution.mode === 'manual' && projectResolution.width && projectResolution.height) {
       return { width: projectResolution.width, height: projectResolution.height }
     }
-    const first = sources[0]
+    const first = sources.find((s) => s.kind !== 'audio')
     return { width: first?.width ?? null, height: first?.height ?? null }
   }, [projectResolution, sources])
 
@@ -79,6 +91,7 @@ export default function App() {
 
   function handleAddSource(source) {
     if (
+      source.kind !== 'audio' &&
       effectiveResolution.width &&
       effectiveResolution.height &&
       !resolutionsMatch(source, effectiveResolution) &&
@@ -111,12 +124,19 @@ export default function App() {
   }
 
   function handleMoveClip(from, to) {
-    setClips((prev) => {
-      const next = [...prev]
-      const [moved] = next.splice(from, 1)
-      next.splice(to, 0, moved)
-      return next
-    })
+    setClips((prev) => moveItem(prev, from, to))
+  }
+
+  function handleAddAudioClip(clipArgs) {
+    setAudioClips((prev) => [...prev, createClip(clipArgs)])
+  }
+
+  function handleRemoveAudioClip(id) {
+    setAudioClips((prev) => prev.filter((c) => c.id !== id))
+  }
+
+  function handleMoveAudioClip(from, to) {
+    setAudioClips((prev) => moveItem(prev, from, to))
   }
 
   return (
@@ -165,6 +185,12 @@ export default function App() {
           onAddClip={handleAddClip}
           onRemoveClip={handleRemoveClip}
           onMoveClip={handleMoveClip}
+          audioClips={audioClips}
+          onAddAudioClip={handleAddAudioClip}
+          onRemoveAudioClip={handleRemoveAudioClip}
+          onMoveAudioClip={handleMoveAudioClip}
+          keepClipAudio={keepClipAudio}
+          onKeepClipAudioChange={setKeepClipAudio}
           ffmpeg={ffmpeg}
           projectResolution={projectResolution}
           onResolutionChange={setProjectResolution}
@@ -186,19 +212,52 @@ export default function App() {
 
           <SourceList sources={sources} selectedId={selectedSourceId} onSelect={setSelectedSourceId} />
 
-          <SourceMonitor source={selectedSource} onAddClip={handleAddClip} />
+          <SourceMonitor source={selectedSource} onAddClip={handleAddClip} onAddAudioClip={handleAddAudioClip} />
 
           <section className="flex flex-col gap-2">
-            <h2 className="text-sm font-semibold text-slate-700">Timeline</h2>
+            <h2 className="text-sm font-semibold text-slate-700">Video track</h2>
             <Timeline clips={clips} onRemove={handleRemoveClip} onMove={handleMoveClip} />
           </section>
 
           <section className="flex flex-col gap-2">
-            <h2 className="text-sm font-semibold text-slate-700">Preview</h2>
-            <RecorderMonitor clips={clips} resolution={effectiveResolution} fitMode={fitMode} />
+            <div className="flex items-center justify-between">
+              <h2 className="text-sm font-semibold text-slate-700">Audio track</h2>
+              <label className="flex items-center gap-1.5 text-xs text-slate-600">
+                <input
+                  type="checkbox"
+                  checked={keepClipAudio}
+                  onChange={(e) => setKeepClipAudio(e.target.checked)}
+                />
+                Keep video clips' own sound
+              </label>
+            </div>
+            <Timeline
+              clips={audioClips}
+              onRemove={handleRemoveAudioClip}
+              onMove={handleMoveAudioClip}
+              emptyText="Audio clips play under the video track from the start, back to back, independent of its cuts"
+            />
           </section>
 
-          <ExportPanel clips={clips} ffmpeg={ffmpeg} resolution={effectiveResolution} fitMode={fitMode} />
+          <section className="flex flex-col gap-2">
+            <h2 className="text-sm font-semibold text-slate-700">Preview</h2>
+            <RecorderMonitor
+              clips={clips}
+              audioClips={audioClips}
+              keepClipAudio={keepClipAudio}
+              resolution={effectiveResolution}
+              fitMode={fitMode}
+            />
+          </section>
+
+          <ExportPanel
+            clips={clips}
+            audioClips={audioClips}
+            keepClipAudio={keepClipAudio}
+            ffmpeg={ffmpeg}
+            resolution={effectiveResolution}
+            fitMode={fitMode}
+          />
         </main>
       )}
     </div>
