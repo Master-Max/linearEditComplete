@@ -1,12 +1,11 @@
-import { useSequencePlayer } from '../hooks/useSequencePlayer'
-import { useAudioTrack } from '../hooks/useAudioTrack'
+import { useRecorderPlayback } from '../hooks/useRecorderPlayback'
 import { formatTime } from '../lib/format'
 
 export default function RecorderMonitor({ clips, audioClips, keepClipAudio, resolution, fitMode }) {
-  const player = useSequencePlayer(clips)
-  const audioRef = useAudioTrack(audioClips, player, { keepClipAudio })
+  const { audioOnly, player, videoRef, audioRefs } = useRecorderPlayback(clips, audioClips, { keepClipAudio })
+  const trackClips = audioOnly ? audioClips : clips
 
-  if (clips.length === 0) {
+  if (trackClips.length === 0) {
     return (
       <div className="flex h-64 items-center justify-center rounded-lg border border-slate-200 text-sm text-slate-400">
         Add clips to the timeline to preview the sequence
@@ -24,11 +23,18 @@ export default function RecorderMonitor({ clips, audioClips, keepClipAudio, reso
     <div className="flex flex-col gap-3">
       {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
       <video
-        ref={player.videoRef}
-        className="w-full rounded-lg bg-black"
+        ref={videoRef}
+        className={`w-full rounded-lg bg-black${audioOnly ? ' hidden' : ''}`}
         style={{ aspectRatio, objectFit: fitMode === 'crop' ? 'cover' : 'contain' }}
       />
-      <audio ref={audioRef} />
+      {audioOnly && (
+        <div className="flex h-24 items-center justify-center rounded-lg bg-slate-800 text-sm text-slate-300">
+          Audio only — exports as an M4A file
+        </div>
+      )}
+      {audioRefs.map((ref, i) => (
+        <audio key={i} ref={ref} />
+      ))}
 
       <input
         type="range"
@@ -59,7 +65,7 @@ export default function RecorderMonitor({ clips, audioClips, keepClipAudio, reso
           {formatTime(player.globalTime)} / {formatTime(player.duration)}
         </span>
         <span className="ml-auto text-slate-400">
-          Clip {player.clipIndex + 1} of {clips.length}
+          {audioOnly ? 'Audio clip' : 'Clip'} {player.clipIndex + 1} of {trackClips.length}
         </span>
       </div>
     </div>

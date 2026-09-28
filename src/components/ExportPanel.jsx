@@ -1,24 +1,26 @@
 import { useState } from 'react'
 
 export default function ExportPanel({ clips, audioClips, keepClipAudio, ffmpeg, resolution, fitMode }) {
-  const [resultUrl, setResultUrl] = useState(null)
+  // { url, kind } - kind ('video' | 'audio') is captured from the export
+  // itself, not the current timeline, which may have changed since.
+  const [result, setResult] = useState(null)
   const [exporting, setExporting] = useState(false)
 
   const busy = ffmpeg.loading || exporting
 
   async function handleExport() {
     setExporting(true)
-    if (resultUrl) URL.revokeObjectURL(resultUrl)
-    setResultUrl(null)
+    if (result) URL.revokeObjectURL(result.url)
+    setResult(null)
     try {
-      const url = await ffmpeg.exportSequence(clips, {
+      const exported = await ffmpeg.exportSequence(clips, {
         width: resolution?.width,
         height: resolution?.height,
         fitMode,
         audioClips,
         keepClipAudio,
       })
-      setResultUrl(url)
+      setResult(exported)
     } catch {
       // ffmpeg.error already carries the message; surfaced below.
     } finally {
@@ -33,10 +35,16 @@ export default function ExportPanel({ clips, audioClips, keepClipAudio, ffmpeg, 
         <button
           type="button"
           onClick={handleExport}
-          disabled={clips.length === 0 || busy}
+          disabled={(clips.length === 0 && audioClips.length === 0) || busy}
           className="rounded bg-indigo-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-indigo-500 disabled:cursor-not-allowed disabled:bg-slate-300"
         >
-          {ffmpeg.loading ? 'Loading ffmpeg…' : exporting ? 'Exporting…' : 'Export Video'}
+          {ffmpeg.loading
+            ? 'Loading ffmpeg…'
+            : exporting
+              ? 'Exporting…'
+              : clips.length === 0 && audioClips.length > 0
+                ? 'Export Audio'
+                : 'Export Video'}
         </button>
       </div>
 
@@ -56,15 +64,19 @@ export default function ExportPanel({ clips, audioClips, keepClipAudio, ffmpeg, 
         <p className="text-sm text-red-600">{ffmpeg.error.message ?? String(ffmpeg.error)}</p>
       )}
 
-      {resultUrl && (
+      {result && (
         <div className="flex flex-col gap-2">
-          <video src={resultUrl} controls className="w-full rounded-lg bg-black" />
+          {result.kind === 'audio' ? (
+            <audio src={result.url} controls className="w-full" />
+          ) : (
+            <video src={result.url} controls className="w-full rounded-lg bg-black" />
+          )}
           <a
-            href={resultUrl}
-            download="linear-edit-export.mp4"
+            href={result.url}
+            download={result.kind === 'audio' ? 'linear-edit-export.m4a' : 'linear-edit-export.mp4'}
             className="self-start rounded bg-slate-800 px-4 py-1.5 text-sm font-medium text-white hover:bg-slate-700"
           >
-            Download MP4
+            {result.kind === 'audio' ? 'Download M4A' : 'Download MP4'}
           </a>
         </div>
       )}

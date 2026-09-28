@@ -235,7 +235,7 @@ export default function App() {
               clips={audioClips}
               onRemove={handleRemoveAudioClip}
               onMove={handleMoveAudioClip}
-              emptyText="Audio clips play under the video track from the start, back to back, independent of its cuts"
+              emptyText="Audio clips play back to back from the start, under the video track (independent of its cuts) or on their own"
             />
           </section>
 
