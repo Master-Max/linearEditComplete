@@ -1,5 +1,5 @@
 import { useRef } from 'react'
-import { isMediaFile, loadVideoSource } from '../lib/loadVideoSource'
+import { isMediaFile, MEDIA_ACCEPT } from '../lib/loadVideoSource'
 import ClassicPlayerDeck from './ClassicPlayerDeck'
 import ClassicEditorConsole from './ClassicEditorConsole'
 import ClassicRecorderDeck from './ClassicRecorderDeck'
@@ -10,6 +10,8 @@ import './classic.css'
 export default function ClassicLayout({
   selectedSource,
   onAddSource,
+  loadSource,
+  onLoadError,
   onSelectSource,
   clips,
   onAddClip,
@@ -34,11 +36,11 @@ export default function ClassicLayout({
     const file = Array.from(fileList).find(isMediaFile)
     if (!file) return
     try {
-      const source = await loadVideoSource(file)
+      const source = await loadSource(file)
       onAddSource(source)
       onSelectSource(source.id)
     } catch (err) {
-      console.error('Failed to load video file:', err)
+      onLoadError(file, err)
     }
   }
 
@@ -77,7 +79,7 @@ export default function ClassicLayout({
       <input
         ref={fileInputRef}
         type="file"
-        accept="video/*,audio/*"
+        accept={MEDIA_ACCEPT}
         className="hidden"
         onChange={(e) => handleLoadFiles(e.target.files)}
       />

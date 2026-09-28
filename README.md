@@ -36,6 +36,11 @@ npm run dev
   into silence and a longer one gets cut off. In preview, a hidden
   `<audio>` element follows the video sequence player's clock
   (`src/hooks/useAudioTrack.js`).
+- Audio can be uploaded the same way as video (drop zone / browse in
+  Modern, LOAD in Classic): MP3, WAV, M4A/AAC, FLAC, OGG/Opus and more,
+  recognized by extension when the browser gives no MIME type. Formats the
+  browser can't play itself (AIFF, WMA, AMR in Chrome, …) are converted
+  through ffmpeg.wasm for preview only; export still reads the original.
 - The audio track also works by itself: with no video clips, preview runs
   on the audio track's own clock (`src/hooks/useAudioSequencePlayer.js`)
   and export produces an M4A file instead of an MP4.

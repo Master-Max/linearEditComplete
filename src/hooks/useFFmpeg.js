@@ -66,6 +66,8 @@ async function concatSegments(ffmpeg, names, listName, outputName, written) {
   written.push(outputName)
 }
 
+let nextPreviewId = 1
+
 function extensionOf(filename) {
   const dot = filename.lastIndexOf('.')
   return dot === -1 ? 'mp4' : filename.slice(dot + 1)
@@ -372,5 +374,45 @@ export function useFFmpeg() {
     [load],
   )
 
-  return { loaded, loading, progress, statusText, error, load, exportSequence, transcodeToIntraProxy }
+  // Converts an audio file the browser can't play natively (see
+  // loadVideoSource's makePlayable) to `format` - 'm4a' (AAC) or 'wav'
+  // (PCM) - for preview only; export always reads the original. Like
+  // transcodeToIntraProxy, this deliberately leaves the shared progress/
+  // status/error state alone, and uses its own FS names (numbered, since
+  // several files can be dropped at once) so it can't collide with a
+  // proxy transcode or export queued on the same instance.
+  const transcodeAudioForPreview = useCallback(
+    async (file, format) => {
+      const ffmpeg = ffmpegRef.current ?? (await load())
+      const n = nextPreviewId++
+      const inputName = `preview-src${n}.${extensionOf(file.name)}`
+      const outputName = `preview-out${n}.${format}`
+      const codecArgs = format === 'wav' ? ['-c:a', 'pcm_s16le'] : ['-c:a', 'aac', '-b:a', '192k']
+      try {
+        await ffmpeg.writeFile(inputName, await fetchFile(file))
+        const code = await ffmpeg.exec(['-i', inputName, '-vn', ...codecArgs, outputName])
+        if (code !== 0) throw new Error(`ffmpeg couldn't convert ${file.name} (exit code ${code})`)
+        const data = await ffmpeg.readFile(outputName)
+        return new Blob([data.buffer], { type: format === 'wav' ? 'audio/wav' : 'audio/mp4' })
+      } finally {
+        await Promise.all([
+          ffmpeg.deleteFile(inputName).catch(() => {}),
+          ffmpeg.deleteFile(outputName).catch(() => {}),
+        ])
+      }
+    },
+    [load],
+  )
+
+  return {
+    loaded,
+    loading,
+    progress,
+    statusText,
+    error,
+    load,
+    exportSequence,
+    transcodeToIntraProxy,
+    transcodeAudioForPreview,
+  }
 }

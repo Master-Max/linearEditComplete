@@ -10,6 +10,7 @@ import ResolutionMismatchNotice from './components/ResolutionMismatchNotice'
 import ToastStack from './components/ToastStack'
 import ClassicLayout from './classic/ClassicLayout'
 import { createClip } from './lib/clip'
+import { loadVideoSource } from './lib/loadVideoSource'
 import { resolutionsMatch } from './lib/resolution'
 import { isResolutionWarningDismissed, dismissResolutionWarningPermanently } from './lib/resolutionWarningPref'
 import { useFFmpeg } from './hooks/useFFmpeg'
@@ -110,6 +111,17 @@ export default function App() {
     setSelectedSourceId((current) => current ?? source.id)
   }
 
+  // Shared by both layouts' upload paths: formats the browser can't play
+  // itself get converted for preview through ffmpeg (see loadVideoSource).
+  function loadSource(file) {
+    return loadVideoSource(file, { makePlayable: ffmpeg.transcodeAudioForPreview })
+  }
+
+  function handleLoadError(file, err) {
+    console.error('Failed to load media file:', err)
+    pushToast({ tone: 'error', title: `Couldn't load ${file.name}`, message: err?.message ?? String(err) })
+  }
+
   function handleMismatchDismiss(dontRemind) {
     if (dontRemind) dismissResolutionWarningPermanently()
     setMismatchNotice(null)
@@ -180,6 +192,8 @@ export default function App() {
         <ClassicLayout
           selectedSource={selectedSource}
           onAddSource={handleAddSource}
+          loadSource={loadSource}
+          onLoadError={handleLoadError}
           onSelectSource={setSelectedSourceId}
           clips={clips}
           onAddClip={handleAddClip}
@@ -208,7 +222,7 @@ export default function App() {
             onFitModeChange={setFitMode}
           />
 
-          <VideoUpload onAdd={handleAddSource} />
+          <VideoUpload onAdd={handleAddSource} loadSource={loadSource} onError={handleLoadError} />
 
           <SourceList sources={sources} selectedId={selectedSourceId} onSelect={setSelectedSourceId} />
 
