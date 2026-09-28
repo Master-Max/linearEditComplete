@@ -1,7 +1,7 @@
 import { clipLength, totalLength } from '../lib/clip'
 import { formatTime } from '../lib/format'
 
-export default function Timeline({ clips, onRemove, onMove }) {
+export default function Timeline({ clips, onRemove, onMove, emptyText = 'Marked clips will appear here in order' }) {
   return (
     <div className="flex flex-col gap-2">
       <div className="flex items-center justify-between text-sm text-slate-500">
@@ -10,8 +10,8 @@ export default function Timeline({ clips, onRemove, onMove }) {
       </div>
 
       {clips.length === 0 ? (
-        <div className="flex h-24 items-center justify-center rounded-lg border border-dashed border-slate-200 text-sm text-slate-400">
-          Marked clips will appear here in order
+        <div className="flex h-24 items-center justify-center rounded-lg border border-dashed border-slate-200 px-4 text-center text-sm text-slate-400">
+          {emptyText}
         </div>
       ) : (
         <ol className="flex flex-col gap-2">

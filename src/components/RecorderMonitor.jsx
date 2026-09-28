@@ -1,8 +1,10 @@
 import { useSequencePlayer } from '../hooks/useSequencePlayer'
+import { useAudioTrack } from '../hooks/useAudioTrack'
 import { formatTime } from '../lib/format'
 
-export default function RecorderMonitor({ clips, resolution, fitMode }) {
+export default function RecorderMonitor({ clips, audioClips, keepClipAudio, resolution, fitMode }) {
   const player = useSequencePlayer(clips)
+  const audioRef = useAudioTrack(audioClips, player, { keepClipAudio })
 
   if (clips.length === 0) {
     return (
@@ -26,6 +28,7 @@ export default function RecorderMonitor({ clips, resolution, fitMode }) {
         className="w-full rounded-lg bg-black"
         style={{ aspectRatio, objectFit: fitMode === 'crop' ? 'cover' : 'contain' }}
       />
+      <audio ref={audioRef} />
 
       <input
         type="range"

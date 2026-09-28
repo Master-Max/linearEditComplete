@@ -17,7 +17,10 @@ export default function SourceList({ sources, selectedId, onSelect }) {
           }`}
         >
           <div className="max-w-[10rem] truncate font-medium">{source.name}</div>
-          <div className="text-xs text-slate-400">{formatTime(source.duration)}</div>
+          <div className="text-xs text-slate-400">
+            {source.kind === 'audio' ? 'Audio · ' : ''}
+            {formatTime(source.duration)}
+          </div>
         </button>
       ))}
     </div>

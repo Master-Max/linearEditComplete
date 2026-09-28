@@ -27,6 +27,15 @@ npm run dev
 - The timeline preview swaps a single `<video>` element's source between
   clips as playback crosses each clip's out-point, so the assembled
   sequence can be previewed instantly without waiting on an export.
+- There's a separate **audio track** under the video track. Its clips play
+  back to back from 0:00, whatever the video cuts are. They can come from
+  audio files (Modern layout) or from the marked range of a video's own
+  sound ("Add to Audio Track" / ADD AUDIO). The track is mixed with the
+  video clips' own sound, or replaces it when "Keep video clips' own sound"
+  is off. The video track sets the length of the export: a shorter audio
+  track runs into silence and a longer one gets cut off. In preview, a
+  hidden `<audio>` element follows the video sequence player's clock
+  (`src/hooks/useAudioTrack.js`).
 - Export writes each clip into ffmpeg.wasm's in-memory virtual
   filesystem, trims and concatenates them there, and hands back a
   downloadable blob — nothing is persisted to disk until you click

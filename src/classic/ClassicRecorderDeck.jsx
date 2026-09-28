@@ -1,8 +1,10 @@
 import { useSequencePlayer } from '../hooks/useSequencePlayer'
+import { useAudioTrack } from '../hooks/useAudioTrack'
 import { formatTimecode } from './formatTimecode'
 
-export default function ClassicRecorderDeck({ clips, fitMode }) {
+export default function ClassicRecorderDeck({ clips, audioClips, keepClipAudio, fitMode }) {
   const player = useSequencePlayer(clips)
+  const audioRef = useAudioTrack(audioClips, player, { keepClipAudio })
 
   function skip(delta) {
     if (clips.length === 0) return
@@ -19,6 +21,7 @@ export default function ClassicRecorderDeck({ clips, fitMode }) {
 
       {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
       <video ref={player.videoRef} style={{ objectFit: fitMode === 'crop' ? 'cover' : 'contain' }} />
+      <audio ref={audioRef} />
 
       <div className="center-div">
         <div className="row">
