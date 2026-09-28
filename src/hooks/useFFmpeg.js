@@ -190,7 +190,12 @@ export function useFFmpeg() {
           : `anullsrc=r=${AUDIO_SAMPLE_RATE}:cl=stereo[a]`
       }
 
+      // No video clips: the audio track is exported on its own, as M4A.
+      const audioOnly = clips.length === 0
+
       try {
+        if (audioOnly && audioClips.length === 0) throw new Error('Nothing to export - the timeline is empty')
+
         const trimmedNames = []
 
         for (let i = 0; i < clips.length; i++) {
@@ -227,10 +232,12 @@ export function useFFmpeg() {
           await releaseInput(clip)
         }
 
-        setStatusText('Joining clips…')
-        await concatSegments(ffmpeg, trimmedNames, 'concat_list.txt', 'joined.mp4', written)
-
         let outputName = 'joined.mp4'
+        if (!audioOnly) {
+          setStatusText('Joining clips…')
+          await concatSegments(ffmpeg, trimmedNames, 'concat_list.txt', 'joined.mp4', written)
+        }
+
         if (audioClips.length > 0) {
           // Trimmed to WAV rather than AAC so the join below is sample-exact:
           // every AAC segment carries its own encoder priming, which a
@@ -254,8 +261,15 @@ export function useFFmpeg() {
             await releaseInput(clip)
           }
 
-          setStatusText('Mixing audio track…')
+          setStatusText(audioOnly ? 'Joining audio clips…' : 'Mixing audio track…')
           await concatSegments(ffmpeg, audioTrimmedNames, 'audio_list.txt', 'audio_track.wav', written)
+        }
+
+        if (audioOnly) {
+          await ffmpeg.exec(['-i', 'audio_track.wav', '-c:a', 'aac', '-b:a', '192k', 'output.m4a'])
+          written.push('output.m4a')
+          outputName = 'output.m4a'
+        } else if (audioClips.length > 0) {
 
           // The video track decides the export's length: apad lets an audio
           // track shorter than the video run out into silence instead of
@@ -280,8 +294,8 @@ export function useFFmpeg() {
         }
 
         const data = await ffmpeg.readFile(outputName)
-        const blob = new Blob([data.buffer], { type: 'video/mp4' })
-        return URL.createObjectURL(blob)
+        const blob = new Blob([data.buffer], { type: audioOnly ? 'audio/mp4' : 'video/mp4' })
+        return { url: URL.createObjectURL(blob), kind: audioOnly ? 'audio' : 'video' }
       } catch (err) {
         setError(err)
         throw err

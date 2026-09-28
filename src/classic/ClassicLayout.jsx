@@ -1,5 +1,5 @@
 import { useRef } from 'react'
-import { loadVideoSource } from '../lib/loadVideoSource'
+import { isMediaFile, loadVideoSource } from '../lib/loadVideoSource'
 import ClassicPlayerDeck from './ClassicPlayerDeck'
 import ClassicEditorConsole from './ClassicEditorConsole'
 import ClassicRecorderDeck from './ClassicRecorderDeck'
@@ -29,14 +29,9 @@ export default function ClassicLayout({
   onFitModeChange,
 }) {
   const fileInputRef = useRef(null)
-  // The player deck is built around a picture - its REW/jog frame cache and
-  // scrub proxy both decode video - so an audio-only source (loadable from
-  // the Modern layout) is treated as an empty deck here rather than fed
-  // through all of that.
-  const deckSource = selectedSource?.kind === 'audio' ? null : selectedSource
 
   async function handleLoadFiles(fileList) {
-    const file = Array.from(fileList).find((f) => f.type.startsWith('video/'))
+    const file = Array.from(fileList).find(isMediaFile)
     if (!file) return
     try {
       const source = await loadVideoSource(file)
@@ -59,7 +54,7 @@ export default function ClassicLayout({
 
       <div id="monitors" className="flexy">
         <ClassicPlayerDeck
-          source={deckSource}
+          source={selectedSource}
           onLoad={() => fileInputRef.current?.click()}
           onEject={() => onSelectSource(null)}
           onAddClip={onAddClip}
@@ -82,7 +77,7 @@ export default function ClassicLayout({
       <input
         ref={fileInputRef}
         type="file"
-        accept="video/*"
+        accept="video/*,audio/*"
         className="hidden"
         onChange={(e) => handleLoadFiles(e.target.files)}
       />

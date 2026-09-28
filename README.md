@@ -29,13 +29,16 @@ npm run dev
   sequence can be previewed instantly without waiting on an export.
 - There's a separate **audio track** under the video track. Its clips play
   back to back from 0:00, whatever the video cuts are. They can come from
-  audio files (Modern layout) or from the marked range of a video's own
-  sound ("Add to Audio Track" / ADD AUDIO). The track is mixed with the
-  video clips' own sound, or replaces it when "Keep video clips' own sound"
-  is off. The video track sets the length of the export: a shorter audio
-  track runs into silence and a longer one gets cut off. In preview, a
-  hidden `<audio>` element follows the video sequence player's clock
+  audio files or from the marked range of a video's own sound ("Add to
+  Audio Track" / ADD AUDIO). The track is mixed with the video clips' own
+  sound, or replaces it when "Keep video clips' own sound" is off. The
+  video track sets the length of the export: a shorter audio track runs
+  into silence and a longer one gets cut off. In preview, a hidden
+  `<audio>` element follows the video sequence player's clock
   (`src/hooks/useAudioTrack.js`).
+- The audio track also works by itself: with no video clips, preview runs
+  on the audio track's own clock (`src/hooks/useAudioSequencePlayer.js`)
+  and export produces an M4A file instead of an MP4.
 - Export writes each clip into ffmpeg.wasm's in-memory virtual
   filesystem, trims and concatenates them there, and hands back a
   downloadable blob — nothing is persisted to disk until you click

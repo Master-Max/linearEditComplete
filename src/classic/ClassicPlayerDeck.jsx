@@ -207,7 +207,10 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip, 
     setScrubPrepStats(null)
 
     async function buildCache() {
-      if (!source?.file || !isFrameCacheSupported()) return
+      // Audio files have no frames to cache (or proxy) - every transport
+      // just drives the media element directly, same as the no-cache
+      // fallback for any video.
+      if (!source?.file || source.kind === 'audio' || !isFrameCacheSupported()) return
 
       let proxyFile = null
       const ffmpegApi = ffmpegRef.current
@@ -255,7 +258,7 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip, 
       frameCacheRef.current?.close()
       frameCacheRef.current = null
     }
-  }, [source?.id, source?.file])
+  }, [source?.id, source?.file, source?.kind])
 
   // markIn/markOut close over inPoint/outPoint state, so the keydown
   // listener below (mounted once) reads them through a ref that's kept
@@ -631,7 +634,9 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip, 
     }
   }
 
-  function addToTimeline(addToTrack = onAddClip) {
+  // An audio source has no picture for the video track, so ADD TO TIMELINE
+  // puts it on the audio track instead.
+  function addToTimeline(addToTrack = source?.kind === 'audio' ? onAddAudioClip : onAddClip) {
     if (!source || marks.outPoint <= marks.inPoint) return
     addToTrack({
       sourceId: source.id,

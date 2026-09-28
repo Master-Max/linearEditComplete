@@ -1,13 +1,12 @@
-import { useSequencePlayer } from '../hooks/useSequencePlayer'
-import { useAudioTrack } from '../hooks/useAudioTrack'
+import { useRecorderPlayback } from '../hooks/useRecorderPlayback'
 import { formatTimecode } from './formatTimecode'
 
 export default function ClassicRecorderDeck({ clips, audioClips, keepClipAudio, fitMode }) {
-  const player = useSequencePlayer(clips)
-  const audioRef = useAudioTrack(audioClips, player, { keepClipAudio })
+  const { audioOnly, player, videoRef, audioRefs } = useRecorderPlayback(clips, audioClips, { keepClipAudio })
+  const trackClips = audioOnly ? audioClips : clips
 
   function skip(delta) {
-    if (clips.length === 0) return
+    if (trackClips.length === 0) return
     player.seek(Math.max(0, Math.min(player.duration, player.globalTime + delta)))
   }
 
@@ -15,13 +14,18 @@ export default function ClassicRecorderDeck({ clips, audioClips, keepClipAudio, 
     <div id="recorder">
       <p>RECORDER</p>
       <div className="row right-justify">
-        <b className="light">{clips.length} CLIP{clips.length === 1 ? '' : 'S'}</b>
+        <b className="light">
+          {trackClips.length} {audioOnly ? 'AUDIO ' : ''}CLIP{trackClips.length === 1 ? '' : 'S'}
+        </b>
       </div>
       <div className="clock">{formatTimecode(player.globalTime)}</div>
 
       {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
-      <video ref={player.videoRef} style={{ objectFit: fitMode === 'crop' ? 'cover' : 'contain' }} />
-      <audio ref={audioRef} />
+      {/* Stays mounted (blank) in audio-only mode so the deck keeps its size. */}
+      <video ref={videoRef} style={{ objectFit: fitMode === 'crop' ? 'cover' : 'contain' }} />
+      {audioRefs.map((ref, i) => (
+        <audio key={i} ref={ref} />
+      ))}
 
       <div className="center-div">
         <div className="row">
@@ -39,7 +43,7 @@ export default function ClassicRecorderDeck({ clips, audioClips, keepClipAudio, 
           <b
             onClick={() => (player.isPlaying ? player.pause() : player.play())}
             className="switch"
-            style={{ opacity: clips.length ? 1 : 0.4 }}
+            style={{ opacity: trackClips.length ? 1 : 0.4 }}
           >
             {player.isPlaying ? 'STILL' : 'PLAY'}
           </b>
