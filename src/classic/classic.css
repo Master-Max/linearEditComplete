@@ -458,3 +458,11 @@
   font-size: 11px;
   font-weight: bold;
 }
+
+.classic-editor .scrub-status-reason {
+  display: block;
+  margin-top: 2px;
+  font-size: 10px;
+  color: #a05a00;
+  overflow-wrap: anywhere;
+}

@@ -69,8 +69,8 @@ function codecCandidates(family, width, height, fps) {
 // Tries hardware first, then whatever the browser has. Returns the first
 // supported config plus whether it's the hardware one - isConfigSupported
 // answers false for 'prefer-hardware' when there's no hardware encoder.
-async function pickEncoderConfig({ families, width, height, fps, bitrate }) {
-  for (const hardwareAcceleration of ['prefer-hardware', 'no-preference']) {
+async function pickEncoderConfig({ families, width, height, fps, bitrate, accelerations }) {
+  for (const hardwareAcceleration of accelerations) {
     for (const family of families) {
       for (const { codec, muxCodec } of codecCandidates(family, width, height, fps)) {
         const config = {
@@ -94,14 +94,14 @@ async function pickEncoderConfig({ families, width, height, fps, bitrate }) {
   throw new Error(`no video encoder for ${families.join('/')} at ${width}x${height}`)
 }
 
-async function pickDecoderConfig(track) {
+async function pickDecoderConfig(track, accelerations) {
   const base = {
     codec: track.codec,
     codedWidth: track.video.width,
     codedHeight: track.video.height,
     description: track.description,
   }
-  for (const hardwareAcceleration of ['prefer-hardware', 'no-preference']) {
+  for (const hardwareAcceleration of accelerations) {
     const config = { ...base, hardwareAcceleration }
     try {
       const { supported } = await VideoDecoder.isConfigSupported(config)
@@ -111,6 +111,51 @@ async function pickDecoderConfig(track) {
     }
   }
   throw new Error(`no video decoder for ${track.codec}`)
+}
+
+// First attempt: hardware where the browser has it, else whatever it picks.
+// Second: force the browser's software codecs. Hardware encoders are the
+// usual thing to fail partway - isConfigSupported can say yes to a config
+// the driver then rejects at configure() or mid-encode - and a software
+// WebCodecs run is still far faster than falling all the way back to
+// ffmpeg.wasm. If both fail, the error names both reasons, for the UI.
+const ACCELERATION_ATTEMPTS = [['prefer-hardware', 'no-preference'], ['prefer-software']]
+
+async function withSoftwareRetry(run, onProgress) {
+  let firstError = null
+  for (const accelerations of ACCELERATION_ATTEMPTS) {
+    try {
+      return await run(accelerations)
+    } catch (err) {
+      // Nothing to do with which codecs were used (e.g. a container this
+      // path can't read) - a software retry would only fail the same way.
+      if (err?.retryable === false) throw err
+      if (!firstError) {
+        firstError = err
+        console.warn('WebCodecs transcode failed, retrying with software codecs', err)
+        onProgress?.(0)
+      } else {
+        throw new Error(`${describe(firstError)}; software retry: ${describe(err)}`)
+      }
+    }
+  }
+  throw firstError
+}
+
+// demux() with a message fit for the UI. Only MP4/MOV go through here;
+// anything else (WebM, AVI, MKV, ...) is ffmpeg.wasm's job.
+async function readContainer(file) {
+  try {
+    return await demux(file)
+  } catch (err) {
+    const wrapped = new Error(`${file.name} isn't an MP4/MOV file this path can read (${describe(err)})`)
+    wrapped.retryable = false
+    throw wrapped
+  }
+}
+
+function describe(err) {
+  return err?.message || err?.name || String(err)
 }
 
 function estimateFps(samples) {
@@ -248,10 +293,14 @@ function drawFitted(ctx, frame, width, height, fitMode) {
 // VP9 otherwise (only our own decoder ever reads this file). Timestamps
 // are the source's presentation times, so the proxy's clock matches the
 // original's.
-export async function buildIntraProxy(file, { maxWidth, onProgress, families = ['avc', 'vp9'] } = {}) {
-  const { track, decodeOrderSamples: samples } = await demux(file)
+export function buildIntraProxy(file, options = {}) {
+  return withSoftwareRetry((accelerations) => buildIntraProxyOnce(file, { ...options, accelerations }), options.onProgress)
+}
+
+async function buildIntraProxyOnce(file, { maxWidth, onProgress, families = ['avc', 'vp9'], accelerations }) {
+  const { track, decodeOrderSamples: samples } = await readContainer(file)
   if (samples.length === 0) throw new Error('no video samples')
-  const decoder = await pickDecoderConfig(track)
+  const decoder = await pickDecoderConfig(track, accelerations)
 
   const scale = Math.min(1, maxWidth / track.video.width)
   const width = even(track.video.width * scale)
@@ -259,7 +308,7 @@ export async function buildIntraProxy(file, { maxWidth, onProgress, families = [
   const fps = estimateFps(samples)
   // Intra-only frames can't borrow from their neighbors, so they need a
   // lot more bits than a normal encode to look the same.
-  const encoder = await pickEncoderConfig({ families, width, height, fps, bitrate: width * height * fps * 0.3 })
+  const encoder = await pickEncoderConfig({ families, width, height, fps, bitrate: width * height * fps * 0.3, accelerations })
 
   const canvas = new OffscreenCanvas(width, height)
   const ctx = canvas.getContext('2d')
@@ -302,12 +351,16 @@ const EXPORT_KEYFRAME_INTERVAL_US = 2e6
 //
 // `families` is the output codec preference - export wants H.264 only;
 // tests can ask for VP9 on machines with no H.264 encoder.
-export async function encodeVideoTrack(clips, { width, height, fitMode = 'letterbox', onProgress, families = ['avc'] } = {}) {
+export function encodeVideoTrack(clips, options = {}) {
+  return withSoftwareRetry((accelerations) => encodeVideoTrackOnce(clips, { ...options, accelerations }), options.onProgress)
+}
+
+async function encodeVideoTrackOnce(clips, { width, height, fitMode = 'letterbox', onProgress, families = ['avc'], accelerations }) {
   const demuxed = new Map() // sourceId -> { track, decodeOrderSamples, decoder }
   for (const clip of clips) {
     if (demuxed.has(clip.sourceId)) continue
-    const result = await demux(clip.file)
-    result.decoder = await pickDecoderConfig(result.track)
+    const result = await readContainer(clip.file)
+    result.decoder = await pickDecoderConfig(result.track, accelerations)
     demuxed.set(clip.sourceId, result)
   }
 
@@ -317,7 +370,14 @@ export async function encodeVideoTrack(clips, { width, height, fitMode = 'letter
   const fps = Math.max(...[...demuxed.values()].map((d) => estimateFps(d.decodeOrderSamples)))
   // ~6Mbps at 1080p30: comfortably above what a phone records at, since
   // this is a re-encode of an already-compressed source.
-  const encoder = await pickEncoderConfig({ families, width: outWidth, height: outHeight, fps, bitrate: outWidth * outHeight * fps * 0.1 })
+  const encoder = await pickEncoderConfig({
+    families,
+    width: outWidth,
+    height: outHeight,
+    fps,
+    bitrate: outWidth * outHeight * fps * 0.1,
+    accelerations,
+  })
 
   // Which samples each clip needs: from the last keyframe at or before its
   // inPoint (decoding can only start at a keyframe) up to the first
