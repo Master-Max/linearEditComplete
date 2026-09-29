@@ -3,6 +3,7 @@ import { FFmpeg } from '@ffmpeg/ffmpeg'
 import { fetchFile, toBlobURL } from '@ffmpeg/util'
 import { buildFitFilter } from '../lib/resolution'
 import { clipLength, totalLength } from '../lib/clip'
+import { buildIntraProxy, encodeVideoTrack, isWebCodecsTranscodeSupported } from '../lib/webcodecsTranscode'
 
 // Self-hosted cores (copied into public/ffmpeg and public/ffmpeg-mt) so
 // nothing is fetched from a third-party CDN and processing works fully
@@ -195,97 +196,97 @@ export function useFFmpeg() {
       // No video clips: the audio track is exported on its own, as M4A.
       const audioOnly = clips.length === 0
 
-      try {
-        if (audioOnly && audioClips.length === 0) throw new Error('Nothing to export - the timeline is empty')
-
-        const trimmedNames = []
-
-        for (let i = 0; i < clips.length; i++) {
-          const clip = clips[i]
-          setStatusText(`Trimming clip ${i + 1} of ${clips.length}…`)
-          const trimmedName = `trim${i}.mp4`
+      // Trims each clip to WAV and joins them, sample-exact - WAV rather
+      // than AAC because every AAC segment carries its own encoder priming,
+      // which a stream-copy concat would turn into a tiny gap at each cut.
+      // `useSourceAudio` false gives exact-length silence per clip instead.
+      async function buildAudioTrack(trackClips, prefix, outputName, useSourceAudio, label) {
+        const names = []
+        for (let i = 0; i < trackClips.length; i++) {
+          const clip = trackClips[i]
+          setStatusText(`${label} ${i + 1} of ${trackClips.length}…`)
+          const trimmedName = `${prefix}${i}.wav`
           const inputName = await inputFor(clip)
-
-          // Normalize every clip to the project resolution before concat: the
-          // final join uses stream copy, which requires identical encoded
-          // dimensions across every segment or it fails/corrupts the output.
-          const videoFilter = width && height ? buildFitFilter(fitMode, width, height) : 'null'
-
-          // -ss after -i is "accurate" (output-side) seeking: ffmpeg decodes
-          // from the start of the input up to inPoint before writing
-          // anything, rather than fast-seeking the demuxer to the nearest
-          // keyframe. Slower on long sources, but it's what fixes audible
-          // A/V drift right at cut points - fast input seeking can let the
-          // video and audio streams snap to slightly different actual
-          // timestamps. -t (duration) is used instead of -to (absolute end
-          // time) because -to's meaning shifts once -ss becomes an output
-          // option; duration has no such ambiguity. It's also what bounds
-          // anullsrc, which would otherwise generate silence forever.
           await ffmpeg.exec([
             '-i', inputName,
-            '-filter_complex', `[0:v:0]${videoFilter}[v];${audioChain(clip, keepClipAudio)}`,
-            '-map', '[v]', '-map', '[a]',
+            '-filter_complex', audioChain(clip, useSourceAudio),
+            '-map', '[a]',
             '-ss', String(clip.inPoint), '-t', String(clipLength(clip)),
-            '-c:v', 'libx264', '-preset', 'ultrafast', '-c:a', 'aac',
+            '-c:a', 'pcm_s16le',
             trimmedName,
           ])
           written.push(trimmedName)
-          trimmedNames.push(trimmedName)
+          names.push(trimmedName)
           await releaseInput(clip)
         }
+        await concatSegments(ffmpeg, names, `${prefix}_list.txt`, outputName, written)
+      }
 
-        let outputName = 'joined.mp4'
-        if (!audioOnly) {
-          setStatusText('Joining clips…')
-          await concatSegments(ffmpeg, trimmedNames, 'concat_list.txt', 'joined.mp4', written)
-        }
+      try {
+        if (audioOnly && audioClips.length === 0) throw new Error('Nothing to export - the timeline is empty')
 
-        if (audioClips.length > 0) {
-          // Trimmed to WAV rather than AAC so the join below is sample-exact:
-          // every AAC segment carries its own encoder priming, which a
-          // stream-copy concat would turn into a tiny gap at each cut.
-          const audioTrimmedNames = []
-          for (let i = 0; i < audioClips.length; i++) {
-            const clip = audioClips[i]
-            setStatusText(`Trimming audio clip ${i + 1} of ${audioClips.length}…`)
-            const trimmedName = `atrim${i}.wav`
-            const inputName = await inputFor(clip)
-            await ffmpeg.exec([
-              '-i', inputName,
-              '-filter_complex', audioChain(clip, true),
-              '-map', '[a]',
-              '-ss', String(clip.inPoint), '-t', String(clipLength(clip)),
-              '-c:a', 'pcm_s16le',
-              trimmedName,
-            ])
-            written.push(trimmedName)
-            audioTrimmedNames.push(trimmedName)
-            await releaseInput(clip)
+        // Video on WebCodecs first (see webcodecsTranscode.js) - the GPU's
+        // encoder where there is one, native code regardless. Any failure
+        // (no H.264 encoder, a source mp4box can't demux, ...) drops back to
+        // the all-ffmpeg path below, which handles everything.
+        let webcodecsVideo = null
+        if (!audioOnly && isWebCodecsTranscodeSupported()) {
+          setStatusText('Encoding video with WebCodecs…')
+          try {
+            webcodecsVideo = await encodeVideoTrack(clips, { width, height, fitMode, onProgress: setProgress })
+          } catch (err) {
+            console.warn('WebCodecs export failed, falling back to ffmpeg.wasm', err)
+            setProgress(0)
           }
-
-          setStatusText(audioOnly ? 'Joining audio clips…' : 'Mixing audio track…')
-          await concatSegments(ffmpeg, audioTrimmedNames, 'audio_list.txt', 'audio_track.wav', written)
         }
+
+        let outputName
+        let videoEngine = null
 
         if (audioOnly) {
+          await buildAudioTrack(audioClips, 'atrim', 'audio_track.wav', true, 'Trimming audio clip')
+          setStatusText('Encoding audio…')
           await ffmpeg.exec(['-i', 'audio_track.wav', '-c:a', 'aac', '-b:a', '192k', 'output.m4a'])
           written.push('output.m4a')
           outputName = 'output.m4a'
-        } else if (audioClips.length > 0) {
+        } else if (webcodecsVideo) {
+          videoEngine = webcodecsVideo.hardware ? 'gpu' : 'webcodecs'
+          await ffmpeg.writeFile('wc_video.mp4', new Uint8Array(await webcodecsVideo.blob.arrayBuffer()))
+          written.push('wc_video.mp4')
 
-          // The video track decides the export's length: apad lets an audio
-          // track shorter than the video run out into silence instead of
-          // ending the output early, and -t cuts one that's longer.
-          // Mixing uses amix with normalize=0 so neither side is attenuated -
-          // amix's default scales each input by 1/N, which would halve the
-          // clips' own sound just for adding a music bed under it.
-          const mix = keepClipAudio
-            ? '[1:a]apad[bed];[0:a][bed]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[a]'
-            : '[1:a]apad[a]'
+          // Audio inputs after the video (input 0): the clips' own sound,
+          // cut to exactly the same lengths the video was, then the audio
+          // track - each only when it's in use.
+          const inputs = ['-i', 'wc_video.mp4']
+          let clipAudio = null
+          let bed = null
+          if (keepClipAudio) {
+            await buildAudioTrack(clips, 'vatrim', 'clip_audio.wav', true, 'Cutting clip audio')
+            inputs.push('-i', 'clip_audio.wav')
+            clipAudio = `[${inputs.length / 2 - 1}:a]`
+          }
+          if (audioClips.length > 0) {
+            await buildAudioTrack(audioClips, 'atrim', 'audio_track.wav', true, 'Trimming audio clip')
+            inputs.push('-i', 'audio_track.wav')
+            bed = `[${inputs.length / 2 - 1}:a]`
+          }
+          // Same mixing rules as the ffmpeg path: amix without
+          // normalization, the audio track padded/cut to the video's length.
+          let audioGraph
+          if (clipAudio && bed) {
+            audioGraph = `${bed}apad[bed];${clipAudio}[bed]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[a]`
+          } else if (clipAudio) {
+            audioGraph = `${clipAudio}anull[a]`
+          } else if (bed) {
+            audioGraph = `${bed}apad[a]`
+          } else {
+            audioGraph = `anullsrc=r=${AUDIO_SAMPLE_RATE}:cl=stereo[a]`
+          }
+
+          setStatusText('Adding audio…')
           await ffmpeg.exec([
-            '-i', 'joined.mp4',
-            '-i', 'audio_track.wav',
-            '-filter_complex', mix,
+            ...inputs,
+            '-filter_complex', audioGraph,
             '-map', '0:v', '-map', '[a]',
             '-t', String(totalLength(clips)),
             '-c:v', 'copy', '-c:a', 'aac',
@@ -293,11 +294,76 @@ export function useFFmpeg() {
           ])
           written.push('output.mp4')
           outputName = 'output.mp4'
+        } else {
+          videoEngine = 'ffmpeg'
+          const trimmedNames = []
+          for (let i = 0; i < clips.length; i++) {
+            const clip = clips[i]
+            setStatusText(`Trimming clip ${i + 1} of ${clips.length}…`)
+            const trimmedName = `trim${i}.mp4`
+            const inputName = await inputFor(clip)
+
+            // Normalize every clip to the project resolution before concat: the
+            // final join uses stream copy, which requires identical encoded
+            // dimensions across every segment or it fails/corrupts the output.
+            const videoFilter = width && height ? buildFitFilter(fitMode, width, height) : 'null'
+
+            // -ss after -i is "accurate" (output-side) seeking: ffmpeg decodes
+            // from the start of the input up to inPoint before writing
+            // anything, rather than fast-seeking the demuxer to the nearest
+            // keyframe. Slower on long sources, but it's what fixes audible
+            // A/V drift right at cut points - fast input seeking can let the
+            // video and audio streams snap to slightly different actual
+            // timestamps. -t (duration) is used instead of -to (absolute end
+            // time) because -to's meaning shifts once -ss becomes an output
+            // option; duration has no such ambiguity. It's also what bounds
+            // anullsrc, which would otherwise generate silence forever.
+            await ffmpeg.exec([
+              '-i', inputName,
+              '-filter_complex', `[0:v:0]${videoFilter}[v];${audioChain(clip, keepClipAudio)}`,
+              '-map', '[v]', '-map', '[a]',
+              '-ss', String(clip.inPoint), '-t', String(clipLength(clip)),
+              '-c:v', 'libx264', '-preset', 'ultrafast', '-c:a', 'aac',
+              trimmedName,
+            ])
+            written.push(trimmedName)
+            trimmedNames.push(trimmedName)
+            await releaseInput(clip)
+          }
+
+          setStatusText('Joining clips…')
+          await concatSegments(ffmpeg, trimmedNames, 'concat_list.txt', 'joined.mp4', written)
+          outputName = 'joined.mp4'
+
+          if (audioClips.length > 0) {
+            await buildAudioTrack(audioClips, 'atrim', 'audio_track.wav', true, 'Trimming audio clip')
+            setStatusText('Mixing audio track…')
+            // The video track decides the export's length: apad lets an audio
+            // track shorter than the video run out into silence instead of
+            // ending the output early, and -t cuts one that's longer.
+            // Mixing uses amix with normalize=0 so neither side is attenuated -
+            // amix's default scales each input by 1/N, which would halve the
+            // clips' own sound just for adding a music bed under it.
+            const mix = keepClipAudio
+              ? '[1:a]apad[bed];[0:a][bed]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[a]'
+              : '[1:a]apad[a]'
+            await ffmpeg.exec([
+              '-i', 'joined.mp4',
+              '-i', 'audio_track.wav',
+              '-filter_complex', mix,
+              '-map', '0:v', '-map', '[a]',
+              '-t', String(totalLength(clips)),
+              '-c:v', 'copy', '-c:a', 'aac',
+              'output.mp4',
+            ])
+            written.push('output.mp4')
+            outputName = 'output.mp4'
+          }
         }
 
         const data = await ffmpeg.readFile(outputName)
         const blob = new Blob([data.buffer], { type: audioOnly ? 'audio/mp4' : 'video/mp4' })
-        return { url: URL.createObjectURL(blob), kind: audioOnly ? 'audio' : 'video' }
+        return { url: URL.createObjectURL(blob), kind: audioOnly ? 'audio' : 'video', videoEngine }
       } catch (err) {
         setError(err)
         throw err
@@ -338,8 +404,24 @@ export function useFFmpeg() {
   // scoped to this call alone (registered/unregistered around exec, not
   // left on the shared FFmpeg instance) - the caller's UI updates without
   // that instance's other listeners (e.g. exportSequence's) seeing it.
+  //
+  // Tries WebCodecs first (see buildIntraProxy in webcodecsTranscode.js):
+  // hardware decode/encode where available, and native code either way -
+  // minutes of ffmpeg.wasm work typically becomes seconds. Resolves to
+  // { blob, engine }, engine being 'gpu' (hardware decode and encode),
+  // 'webcodecs' (the browser's native software codecs) or 'ffmpeg'.
   const transcodeToIntraProxy = useCallback(
     async (file, { onProgress } = {}) => {
+      if (isWebCodecsTranscodeSupported()) {
+        try {
+          const result = await buildIntraProxy(file, { maxWidth: PROXY_MAX_WIDTH, onProgress })
+          return { blob: result.blob, engine: result.hardware ? 'gpu' : 'webcodecs' }
+        } catch (err) {
+          console.warn('WebCodecs scrub proxy failed, falling back to ffmpeg.wasm', err)
+          onProgress?.(0)
+        }
+      }
+
       const ffmpeg = ffmpegRef.current ?? (await load())
       const inputName = `proxy-src.${extensionOf(file.name)}`
       const outputName = 'proxy-out.mp4'
@@ -362,7 +444,7 @@ export function useFFmpeg() {
           outputName,
         ])
         const data = await ffmpeg.readFile(outputName)
-        return new Blob([data.buffer], { type: 'video/mp4' })
+        return { blob: new Blob([data.buffer], { type: 'video/mp4' }), engine: 'ffmpeg' }
       } finally {
         if (handleProgress) ffmpeg.off('progress', handleProgress)
         await Promise.all([

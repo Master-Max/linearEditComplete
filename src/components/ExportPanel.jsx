@@ -1,5 +1,12 @@
 import { useState } from 'react'
 
+// Which path exportSequence took for the video (see useFFmpeg.js).
+const ENGINE_LABELS = {
+  gpu: 'on the GPU (WebCodecs, hardware)',
+  webcodecs: 'with WebCodecs (browser software encoder)',
+  ffmpeg: 'with ffmpeg.wasm (CPU)',
+}
+
 export default function ExportPanel({ clips, audioClips, keepClipAudio, ffmpeg, resolution, fitMode }) {
   // { url, kind } - kind ('video' | 'audio') is captured from the export
   // itself, not the current timeline, which may have changed since.
@@ -78,6 +85,9 @@ export default function ExportPanel({ clips, audioClips, keepClipAudio, ffmpeg, 
           >
             {result.kind === 'audio' ? 'Download M4A' : 'Download MP4'}
           </a>
+          {result.videoEngine && (
+            <p className="text-xs text-slate-400">Video encoded {ENGINE_LABELS[result.videoEngine]}</p>
+          )}
         </div>
       )}
     </div>
