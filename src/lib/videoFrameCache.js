@@ -1,4 +1,5 @@
 import { createFile, DataStream, Endianness } from 'mp4box'
+import { demuxWebM, isWebM } from './webmDemux.js'
 
 // WebCodecs-based reverse scrub, first slice.
 //
@@ -22,12 +23,11 @@ import { createFile, DataStream, Endianness } from 'mp4box'
 // on-demand decode - never worse than before this existed, and usually
 // free because the wait already happened in the background.
 //
-// Scope: MP4/MOV containers with an AVC (H.264) or HEVC (H.265) video
-// track - the common case for footage recorded on phones/most cameras, and
-// for anything already round-tripped through this app's own ffmpeg export.
-// WebM/VP9/AV1 sources, containers mp4box can't parse, or a codec string
-// VideoDecoder rejects all fail init() and the caller is expected to fall
-// back to the existing <video> currentTime-stepping REW.
+// Scope: MP4/MOV (via mp4box) and WebM/MKV (via webmDemux.js) - phone and
+// camera footage, screen recordings, and this app's own exports - with
+// whatever video codec the browser's VideoDecoder takes (H.264, HEVC, VP8,
+// VP9, AV1). Other containers, or a codec VideoDecoder rejects, fail
+// init() and the caller falls back to the <video> currentTime-stepping REW.
 
 // How many GOPs on each side of the current one to keep decoded and ready.
 // 1 covers a single step across a boundary (REW/FF/jog's normal case); raise
@@ -138,7 +138,17 @@ function presentationOffsetTicks(mp4boxFile, trackId, movieTimescale, mediaTimes
 // a real B-frame fixture. Everything up to `VideoDecoder` is pure JS that
 // works under plain Node, so the demux half is testable without a browser -
 // worth keeping reachable, since it's the half that had a silent bug.
-export function demux(file) {
+//
+// WebM/Matroska goes to webmDemux.js instead (sniffed from the EBML magic
+// bytes, not the file name), which returns the same shape.
+export async function demux(file) {
+  const buffer = await file.arrayBuffer()
+  const bytes = new Uint8Array(buffer)
+  if (isWebM(bytes)) return demuxWebM(bytes)
+  return demuxMp4(buffer)
+}
+
+function demuxMp4(buffer) {
   return new Promise((resolve, reject) => {
     const mp4boxFile = createFile()
     let trackInfo = null
@@ -173,14 +183,13 @@ export function demux(file) {
       resolve({ track: trackInfo, decodeOrderSamples })
     }
 
-    file
-      .arrayBuffer()
-      .then((buffer) => {
-        buffer.fileStart = 0
-        mp4boxFile.appendBuffer(buffer)
-        mp4boxFile.flush()
-      })
-      .catch(reject)
+    try {
+      buffer.fileStart = 0
+      mp4boxFile.appendBuffer(buffer)
+      mp4boxFile.flush()
+    } catch (err) {
+      reject(err)
+    }
   })
 }
 

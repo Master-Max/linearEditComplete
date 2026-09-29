@@ -142,13 +142,13 @@ async function withSoftwareRetry(run, onProgress) {
   throw firstError
 }
 
-// demux() with a message fit for the UI. Only MP4/MOV go through here;
-// anything else (WebM, AVI, MKV, ...) is ffmpeg.wasm's job.
+// demux() with a message fit for the UI. MP4/MOV and WebM/MKV go through
+// here; anything else (AVI, MPEG-TS, ...) is ffmpeg.wasm's job.
 async function readContainer(file) {
   try {
     return await demux(file)
   } catch (err) {
-    const wrapped = new Error(`${file.name} isn't an MP4/MOV file this path can read (${describe(err)})`)
+    const wrapped = new Error(`couldn't read ${file.name} for WebCodecs (${describe(err)})`)
     wrapped.retryable = false
     throw wrapped
   }

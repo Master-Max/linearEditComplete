@@ -52,8 +52,8 @@ npm run dev
   or VP9 when the browser has no H.264 encoder) and export's video track
   (H.264 only). Audio, mixing and the final mux stay on ffmpeg.wasm, which
   is also the full fallback whenever WebCodecs can't handle a source - no
-  H.264 encoder, or a container other than MP4/MOV. The UI says which
-  engine did the work.
+  H.264 encoder, or a container other than MP4/MOV/WebM/MKV. The UI says
+  which engine did the work, and why when it wasn't WebCodecs.
 - Export writes each clip into ffmpeg.wasm's in-memory virtual
   filesystem, trims and concatenates them there, and hands back a
   downloadable blob — nothing is persisted to disk until you click
