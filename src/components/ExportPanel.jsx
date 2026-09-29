@@ -86,7 +86,10 @@ export default function ExportPanel({ clips, audioClips, keepClipAudio, ffmpeg, 
             {result.kind === 'audio' ? 'Download M4A' : 'Download MP4'}
           </a>
           {result.videoEngine && (
-            <p className="text-xs text-slate-400">Video encoded {ENGINE_LABELS[result.videoEngine]}</p>
+            <p className="text-xs text-slate-400">
+              Video encoded {ENGINE_LABELS[result.videoEngine]}
+              {result.fallbackReason && <> — GPU/WebCodecs not used: {result.fallbackReason}</>}
+            </p>
           )}
         </div>
       )}

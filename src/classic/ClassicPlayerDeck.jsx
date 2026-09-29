@@ -86,6 +86,19 @@ const ENGINE_LABELS = {
   ffmpeg: 'with ffmpeg.wasm (CPU)',
 }
 
+// Where to seek <video> to show the frame that starts at `frameTime`
+// (seconds, from a cached VideoFrame's microsecond timestamp). Seeking to
+// the start exactly isn't safe: the microsecond value is rounded, so it can
+// land a hair *before* the frame's true start, and <video> then shows the
+// previous frame - measured as a permanent one-frame mismatch between the
+// canvas and <video> after REW. 1ms in is still well inside the frame at
+// any real frame rate.
+const FRAME_SEEK_NUDGE_SECONDS = 0.001
+
+function seekTimeForFrame(frameTime) {
+  return frameTime + FRAME_SEEK_NUDGE_SECONDS
+}
+
 function formatScrubPrepSeconds(seconds) {
   return seconds >= 10 ? `${Math.round(seconds)}` : seconds.toFixed(1)
 }
@@ -126,6 +139,11 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip, 
   const marks = usePlayerMarks(videoRef, source)
   const rewindRaf = useRef(null)
   const forwardRvfc = useRef(null)
+  // True while the canvas is being kept up only to cover <video>'s catch-up
+  // seek after a canvas REW (see stopCanvasRewind). Whatever draws on the
+  // canvas next claims it by clearing this, so the pending release doesn't
+  // hide a canvas that's now showing something newer.
+  const canvasHeldForSeek = useRef(false)
   const frameCacheRef = useRef(null)
   const [isPreparingScrub, setIsPreparingScrub] = useState(false)
   const [scrubPrepProgress, setScrubPrepProgress] = useState(0)
@@ -210,6 +228,7 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip, 
       forwardRvfc.current = null
     }
     setIsCanvasActive(false)
+    canvasHeldForSeek.current = false
 
     let cancelled = false
     frameCacheRef.current?.close()
@@ -265,6 +284,7 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip, 
               seconds: (performance.now() - startedAt) / 1000,
               sourceDuration: source.duration,
               engine: proxy.engine,
+              fallbackReason: proxy.fallbackReason,
             })
           }
         } catch (err) {
@@ -325,13 +345,35 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip, 
   // drawn), not scrubTimeRef (the idealized continuous scrub position - see
   // startCanvasRewind), so the video resumes from exactly what was on
   // screen rather than a slightly later moment mid-frame.
+  //
+  // The canvas stays up until <video> has actually landed on that frame.
+  // It used to be hidden straight away, which uncovered <video> still
+  // parked wherever REW *started* (it's paused for the whole run) - so
+  // STILL/PLAY after REW flashed that old frame until the seek caught up,
+  // which on long-GOP footage is a visible moment. Same idea as jog()'s
+  // wait for 'seeked'. The timer is only a backstop for a seek that never
+  // reports back (e.g. the element errored), so the canvas can't get stuck.
   function stopCanvasRewind() {
     if (rewindRaf.current == null) return
     cancelAnimationFrame(rewindRaf.current)
     rewindRaf.current = null
-    setIsCanvasActive(false)
     const v = videoRef.current
-    if (v) v.currentTime = lastDrawnTimeRef.current
+    if (!v) {
+      setIsCanvasActive(false)
+      return
+    }
+    canvasHeldForSeek.current = true
+    let backstop = null
+    const release = () => {
+      clearTimeout(backstop)
+      v.removeEventListener('seeked', release)
+      if (!canvasHeldForSeek.current) return // something else drew on it since
+      canvasHeldForSeek.current = false
+      setIsCanvasActive(false)
+    }
+    v.addEventListener('seeked', release)
+    backstop = setTimeout(release, 3000)
+    v.currentTime = seekTimeForFrame(lastDrawnTimeRef.current)
   }
 
   // Ends the forward-playback render loop (see startForwardCanvas) started
@@ -377,8 +419,11 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip, 
     if (!video || !canvas || !ctx || typeof video.requestVideoFrameCallback !== 'function') return
 
     // Paint what <video> is showing before swapping the canvas in, same as
-    // startCanvasRewind - no flash of the canvas's black background.
-    paintCurrentVideoFrame(video, canvas, ctx)
+    // startCanvasRewind - no flash of the canvas's black background. Unless
+    // the canvas is still up from a REW: then it's already showing the
+    // right frame, and <video> may not have caught up to it yet.
+    if (!canvasHeldForSeek.current) paintCurrentVideoFrame(video, canvas, ctx)
+    canvasHeldForSeek.current = false
     setIsCanvasActive(true)
     // Reset so this run's first clock update lands immediately rather than
     // being throttled against whatever the previous run's last update was.
@@ -422,24 +467,46 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip, 
     forwardRvfc.current = video.requestVideoFrameCallback(onFrame)
   }
 
-  function play() {
+  // PLAY and FF: forward playback at `rate`.
+  //
+  // Waits out any seek still in flight before calling video.play(). Going
+  // straight from REW to FF (or PLAY) issues a seek back to wherever REW
+  // stopped (stopCanvasRewind) and, before this, called play() at 4x in
+  // the same breath. On long-GOP footage that seek is a slow decode from
+  // the previous keyframe, and starting fast playback in the middle of it
+  // could leave <video> stalled - the "REW then FF gets stuck, but works
+  // if I press STILL first" report: STILL gave the seek time to land. The
+  // canvas keeps showing REW's last frame in the meantime.
+  function startForward(rate) {
     transportGeneration.current++
     stopCanvasRewind()
     stopForwardCanvas()
     const v = videoRef.current
     if (!v) return
-    v.playbackRate = 1
-    // Gated on the frame cache existing even though forward rendering no
-    // longer reads from it: that's the signal REW will also be canvas-based
-    // this session, so the display surface stays consistent across
-    // transports. Without a cache, REW falls back to reseeking <video>
-    // directly and <video> stays the visible element throughout.
-    if (frameCacheRef.current) startForwardCanvas()
-    // play() returns a promise that rejects with AbortError if the play
-    // request gets interrupted (e.g. a pause()/another play() call lands
-    // before it resolves - REW does exactly that). Expected and harmless,
-    // but needs a catch or it surfaces as an unhandled rejection.
-    v.play().catch(() => {})
+    const myGeneration = transportGeneration.current
+
+    function go() {
+      if (transportGeneration.current !== myGeneration) return // another transport took over
+      v.playbackRate = rate
+      // Gated on the frame cache existing even though forward rendering no
+      // longer reads from it: that's the signal REW will also be canvas-based
+      // this session, so the display surface stays consistent across
+      // transports. Without a cache, REW falls back to reseeking <video>
+      // directly and <video> stays the visible element throughout.
+      if (frameCacheRef.current) startForwardCanvas()
+      // play() returns a promise that rejects with AbortError if the play
+      // request gets interrupted (e.g. a pause()/another play() call lands
+      // before it resolves - REW does exactly that). Expected and harmless,
+      // but needs a catch or it surfaces as an unhandled rejection.
+      v.play().catch(() => {})
+    }
+
+    if (v.seeking) v.addEventListener('seeked', go, { once: true })
+    else go()
+  }
+
+  function play() {
+    startForward(1)
   }
 
   function still() {
@@ -450,14 +517,7 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip, 
   }
 
   function fastForward() {
-    transportGeneration.current++
-    stopCanvasRewind()
-    stopForwardCanvas()
-    const v = videoRef.current
-    if (!v) return
-    v.playbackRate = 4
-    if (frameCacheRef.current) startForwardCanvas() // see the note in play()
-    v.play().catch(() => {})
+    startForward(4)
   }
 
   // Walks the WebCodecs frame cache backward, drawing each frame to the
@@ -479,8 +539,10 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip, 
     // Paint the frame the <video> is already showing (it's already paused
     // at startTime by rewind()) before swapping the canvas in, so there's
     // no flash of the canvas's own black background while the first cache
-    // decode is still in flight.
-    paintCurrentVideoFrame(video, canvas, ctx)
+    // decode is still in flight. If the canvas is still up from a previous
+    // REW, it already shows startTime's frame and <video> may lag behind.
+    if (!canvasHeldForSeek.current) paintCurrentVideoFrame(video, canvas, ctx)
+    canvasHeldForSeek.current = false
     lastDrawnTimeRef.current = startTime
     setIsCanvasActive(true)
     // Reset so this run's first clock update lands immediately rather than
@@ -664,12 +726,13 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip, 
       const ctx = canvas?.getContext('2d')
       if (canvas && ctx && fitCanvasToSource(canvas, frame.displayWidth, frame.displayHeight)) {
         ctx.drawImage(frame, 0, 0, canvas.width, canvas.height)
+        canvasHeldForSeek.current = false
         setIsCanvasActive(true)
       }
       const shownTime = frame.timestamp / 1e6
       lastDrawnTimeRef.current = shownTime
       marks.setCurrentTime(shownTime)
-      v.currentTime = shownTime
+      v.currentTime = seekTimeForFrame(shownTime)
       // The canvas draw above is instant; <video>'s own seek to the same
       // position is not. Once it catches up, hand back to showing <video>
       // directly rather than leaving the canvas up indefinitely - but only
@@ -807,6 +870,9 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip, 
         <p className="scrub-status">
           File transcoded {ENGINE_LABELS[scrubPrepStats.engine]} — {formatScrubPrepSeconds(scrubPrepStats.seconds)}s for{' '}
           {formatMinutes(scrubPrepStats.sourceDuration)} minute video
+          {scrubPrepStats.fallbackReason && (
+            <span className="scrub-status-reason">GPU/WebCodecs not used: {scrubPrepStats.fallbackReason}</span>
+          )}
         </p>
       )}
 

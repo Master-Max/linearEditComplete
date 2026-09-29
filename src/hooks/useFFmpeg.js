@@ -230,13 +230,19 @@ export function useFFmpeg() {
         // (no H.264 encoder, a source mp4box can't demux, ...) drops back to
         // the all-ffmpeg path below, which handles everything.
         let webcodecsVideo = null
-        if (!audioOnly && isWebCodecsTranscodeSupported()) {
-          setStatusText('Encoding video with WebCodecs…')
-          try {
-            webcodecsVideo = await encodeVideoTrack(clips, { width, height, fitMode, onProgress: setProgress })
-          } catch (err) {
-            console.warn('WebCodecs export failed, falling back to ffmpeg.wasm', err)
-            setProgress(0)
+        let fallbackReason = null
+        if (!audioOnly) {
+          if (isWebCodecsTranscodeSupported()) {
+            setStatusText('Encoding video with WebCodecs…')
+            try {
+              webcodecsVideo = await encodeVideoTrack(clips, { width, height, fitMode, onProgress: setProgress })
+            } catch (err) {
+              console.warn('WebCodecs export failed, falling back to ffmpeg.wasm', err)
+              fallbackReason = err?.message || String(err)
+              setProgress(0)
+            }
+          } else {
+            fallbackReason = 'this browser has no WebCodecs video encoder'
           }
         }
 
@@ -363,7 +369,12 @@ export function useFFmpeg() {
 
         const data = await ffmpeg.readFile(outputName)
         const blob = new Blob([data.buffer], { type: audioOnly ? 'audio/mp4' : 'video/mp4' })
-        return { url: URL.createObjectURL(blob), kind: audioOnly ? 'audio' : 'video', videoEngine }
+        return {
+          url: URL.createObjectURL(blob),
+          kind: audioOnly ? 'audio' : 'video',
+          videoEngine,
+          fallbackReason: videoEngine === 'ffmpeg' ? fallbackReason : null,
+        }
       } catch (err) {
         setError(err)
         throw err
@@ -408,16 +419,19 @@ export function useFFmpeg() {
   // Tries WebCodecs first (see buildIntraProxy in webcodecsTranscode.js):
   // hardware decode/encode where available, and native code either way -
   // minutes of ffmpeg.wasm work typically becomes seconds. Resolves to
-  // { blob, engine }, engine being 'gpu' (hardware decode and encode),
-  // 'webcodecs' (the browser's native software codecs) or 'ffmpeg'.
+  // { blob, engine, fallbackReason }, engine being 'gpu' (hardware decode
+  // and encode), 'webcodecs' (the browser's native software codecs) or
+  // 'ffmpeg'; fallbackReason says why it's 'ffmpeg', for the UI.
   const transcodeToIntraProxy = useCallback(
     async (file, { onProgress } = {}) => {
+      let fallbackReason = 'this browser has no WebCodecs video encoder'
       if (isWebCodecsTranscodeSupported()) {
         try {
           const result = await buildIntraProxy(file, { maxWidth: PROXY_MAX_WIDTH, onProgress })
           return { blob: result.blob, engine: result.hardware ? 'gpu' : 'webcodecs' }
         } catch (err) {
           console.warn('WebCodecs scrub proxy failed, falling back to ffmpeg.wasm', err)
+          fallbackReason = err?.message || String(err)
           onProgress?.(0)
         }
       }
@@ -444,7 +458,7 @@ export function useFFmpeg() {
           outputName,
         ])
         const data = await ffmpeg.readFile(outputName)
-        return { blob: new Blob([data.buffer], { type: 'video/mp4' }), engine: 'ffmpeg' }
+        return { blob: new Blob([data.buffer], { type: 'video/mp4' }), engine: 'ffmpeg', fallbackReason }
       } finally {
         if (handleProgress) ffmpeg.off('progress', handleProgress)
         await Promise.all([
