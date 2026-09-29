@@ -3,7 +3,7 @@ import { useState } from 'react'
 // Which path exportSequence took for the video (see useFFmpeg.js).
 const ENGINE_LABELS = {
   gpu: 'on the GPU (WebCodecs, hardware)',
-  webcodecs: 'with WebCodecs (browser software encoder)',
+  webcodecs: 'with WebCodecs',
   ffmpeg: 'with ffmpeg.wasm (CPU)',
 }
 
@@ -88,6 +88,7 @@ export default function ExportPanel({ clips, audioClips, keepClipAudio, ffmpeg, 
           {result.videoEngine && (
             <p className="text-xs text-slate-400">
               Video encoded {ENGINE_LABELS[result.videoEngine]}
+              {result.engineDetail && ` (${result.engineDetail})`}
               {result.fallbackReason && <> — GPU/WebCodecs not used: {result.fallbackReason}</>}
             </p>
           )}

@@ -82,7 +82,7 @@ function paintCurrentVideoFrame(video, canvas, ctx) {
 // How the scrub proxy got made - see transcodeToIntraProxy in useFFmpeg.js.
 const ENGINE_LABELS = {
   gpu: 'on the GPU',
-  webcodecs: 'with WebCodecs (software)',
+  webcodecs: 'with WebCodecs',
   ffmpeg: 'with ffmpeg.wasm (CPU)',
 }
 
@@ -284,6 +284,7 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip, 
               seconds: (performance.now() - startedAt) / 1000,
               sourceDuration: source.duration,
               engine: proxy.engine,
+              detail: proxy.detail,
               fallbackReason: proxy.fallbackReason,
             })
           }
@@ -868,7 +869,8 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip, 
       )}
       {!isPreparingScrub && scrubPrepStats && (
         <p className="scrub-status">
-          File transcoded {ENGINE_LABELS[scrubPrepStats.engine]} — {formatScrubPrepSeconds(scrubPrepStats.seconds)}s for{' '}
+          File transcoded {ENGINE_LABELS[scrubPrepStats.engine]}
+          {scrubPrepStats.detail && ` (${scrubPrepStats.detail})`} — {formatScrubPrepSeconds(scrubPrepStats.seconds)}s for{' '}
           {formatMinutes(scrubPrepStats.sourceDuration)} minute video
           {scrubPrepStats.fallbackReason && (
             <span className="scrub-status-reason">GPU/WebCodecs not used: {scrubPrepStats.fallbackReason}</span>

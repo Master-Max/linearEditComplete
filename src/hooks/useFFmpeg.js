@@ -248,6 +248,7 @@ export function useFFmpeg() {
 
         let outputName
         let videoEngine = null
+        let engineDetail = null
 
         if (audioOnly) {
           await buildAudioTrack(audioClips, 'atrim', 'audio_track.wav', true, 'Trimming audio clip')
@@ -257,6 +258,7 @@ export function useFFmpeg() {
           outputName = 'output.m4a'
         } else if (webcodecsVideo) {
           videoEngine = webcodecsVideo.hardware ? 'gpu' : 'webcodecs'
+          engineDetail = webcodecsVideo.detail
           await ffmpeg.writeFile('wc_video.mp4', new Uint8Array(await webcodecsVideo.blob.arrayBuffer()))
           written.push('wc_video.mp4')
 
@@ -373,6 +375,7 @@ export function useFFmpeg() {
           url: URL.createObjectURL(blob),
           kind: audioOnly ? 'audio' : 'video',
           videoEngine,
+          engineDetail,
           fallbackReason: videoEngine === 'ffmpeg' ? fallbackReason : null,
         }
       } catch (err) {
@@ -428,7 +431,7 @@ export function useFFmpeg() {
       if (isWebCodecsTranscodeSupported()) {
         try {
           const result = await buildIntraProxy(file, { maxWidth: PROXY_MAX_WIDTH, onProgress })
-          return { blob: result.blob, engine: result.hardware ? 'gpu' : 'webcodecs' }
+          return { blob: result.blob, engine: result.hardware ? 'gpu' : 'webcodecs', detail: result.detail }
         } catch (err) {
           console.warn('WebCodecs scrub proxy failed, falling back to ffmpeg.wasm', err)
           fallbackReason = err?.message || String(err)
