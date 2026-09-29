@@ -117,7 +117,6 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip, 
   const videoRef = useRef(null)
   const canvasRef = useRef(null)
   const marks = usePlayerMarks(videoRef, source)
-  const rewindTimer = useRef(null)
   const rewindRaf = useRef(null)
   const forwardRvfc = useRef(null)
   const frameCacheRef = useRef(null)
@@ -166,15 +165,22 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip, 
   // and every transport falls back to driving <video> directly, as before
   // this cache existed.
   //
-  // Before demuxing, tries to transcode the source to an all-intra proxy
-  // (see transcodeToIntraProxy in useFFmpeg.js) and build the cache from
-  // that instead of the camera-original file - every output frame is its
-  // own GOP, which is what actually fixes REW/jog's GOP-decode latency
-  // rather than just working around it (see "Transcode footage on load" in
-  // TECHDEBT.md). If ffmpeg can't run at all, or the transcode itself
-  // fails, this falls through to demuxing the original file exactly as
-  // before the proxy existed - the proxy is a strict enhancement, never a
-  // requirement.
+  // Two phases:
+  // 1. A cache straight from the camera-original file, ready as soon as
+  //    it's demuxed (well under a second). REW/jog use it right away. Its
+  //    GOPs can be long, so a REW that crosses into a new one waits while
+  //    the whole GOP decodes, but that's once per GOP. Waiting for phase 2
+  //    before having any cache left REW on the <video> reseek fallback for
+  //    the whole transcode, and that re-decodes the GOP for every single
+  //    step, which on real footage barely moved at all.
+  // 2. The all-intra proxy (see transcodeToIntraProxy in useFFmpeg.js):
+  //    every output frame is its own GOP, which is what actually fixes
+  //    REW/jog's GOP-decode latency rather than just working around it
+  //    (see "Transcode footage on load" in TECHDEBT.md). When it's ready it
+  //    replaces the phase 1 cache, mid-REW included (see the cache-swap
+  //    checks in startCanvasRewind). If ffmpeg can't run, or the transcode
+  //    fails, phase 1's cache just stays - the proxy is a strict
+  //    enhancement, never a requirement.
   useEffect(() => {
     // The <video> element itself remounts on source change (it's keyed by
     // source?.id), but this component doesn't - so the "cancel everything
@@ -190,7 +196,6 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip, 
     // are best-effort on top of that (harmless if they end up targeting a
     // freshly-remounted <video> rather than the one that scheduled them).
     transportGeneration.current++
-    clearInterval(rewindTimer.current)
     cancelAnimationFrame(rewindRaf.current)
     rewindRaf.current = null
     if (forwardRvfc.current != null) {
@@ -206,11 +211,32 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip, 
     setScrubPrepProgress(0)
     setScrubPrepStats(null)
 
+    // Installs `cache` as the active one, closing whatever it replaces.
+    async function install(cache, label) {
+      try {
+        await cache.init()
+      } catch (err) {
+        console.warn(`WebCodecs frame cache (${label}) unavailable`, err)
+        cache.close()
+        return
+      }
+      if (cancelled) {
+        cache.close()
+        return
+      }
+      const previous = frameCacheRef.current
+      frameCacheRef.current = cache
+      previous?.close()
+    }
+
     async function buildCache() {
       // Audio files have no frames to cache (or proxy) - every transport
       // just drives the media element directly, same as the no-cache
       // fallback for any video.
       if (!source?.file || source.kind === 'audio' || !isFrameCacheSupported()) return
+
+      await install(new VideoFrameCache(source.file), 'original file')
+      if (cancelled) return
 
       let proxyFile = null
       const ffmpegApi = ffmpegRef.current
@@ -234,21 +260,9 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip, 
         if (cancelled) return
       }
 
-      const cache = proxyFile
-        ? new VideoFrameCache(proxyFile, { windowRadiusGops: PROXY_WINDOW_RADIUS_FRAMES })
-        : new VideoFrameCache(source.file)
-
-      try {
-        await cache.init()
-      } catch (err) {
-        console.warn('WebCodecs frame cache unavailable, REW will reseek instead', err)
-        return
+      if (proxyFile) {
+        await install(new VideoFrameCache(proxyFile, { windowRadiusGops: PROXY_WINDOW_RADIUS_FRAMES }), 'scrub proxy')
       }
-      if (cancelled) {
-        cache.close()
-        return
-      }
-      frameCacheRef.current = cache
     }
 
     buildCache()
@@ -282,7 +296,6 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip, 
 
   useEffect(
     () => () => {
-      clearInterval(rewindTimer.current)
       cancelAnimationFrame(rewindRaf.current)
       if (forwardRvfc.current != null) videoRef.current?.cancelVideoFrameCallback?.(forwardRvfc.current)
     },
@@ -396,7 +409,6 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip, 
 
   function play() {
     transportGeneration.current++
-    clearInterval(rewindTimer.current)
     stopCanvasRewind()
     stopForwardCanvas()
     const v = videoRef.current
@@ -417,7 +429,6 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip, 
 
   function still() {
     transportGeneration.current++
-    clearInterval(rewindTimer.current)
     stopCanvasRewind()
     stopForwardCanvas()
     videoRef.current?.pause()
@@ -425,7 +436,6 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip, 
 
   function fastForward() {
     transportGeneration.current++
-    clearInterval(rewindTimer.current)
     stopCanvasRewind()
     stopForwardCanvas()
     const v = videoRef.current
@@ -442,7 +452,10 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip, 
   // Steps by actual elapsed wall-clock time (rather than assuming a fixed
   // tick length) so the rate holds even if a frame decode takes a tick or
   // two longer than usual.
-  function startCanvasRewind(cache, startTime) {
+  // Reads frameCacheRef fresh on every step rather than holding on to one
+  // cache: the scrub proxy's cache can replace the original-file one
+  // mid-REW (see buildCache), and the run should just carry on with it.
+  function startCanvasRewind(startTime) {
     const video = videoRef.current
     const canvas = canvasRef.current
     const ctx = canvas?.getContext('2d')
@@ -480,11 +493,25 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip, 
       const time = Math.max(0, scrubTimeRef.current - elapsed * REWIND_RATE)
       scrubTimeRef.current = time
 
+      const cache = frameCacheRef.current
+      if (!cache) {
+        stopCanvasRewind()
+        startReseekRewind()
+        return
+      }
+      // The cache was swapped out (and closed) while this step was waiting
+      // on it - not a failure, just redo the step against the new one.
+      const cacheSwapped = () => frameCacheRef.current !== cache
+
       let frame
       try {
         frame = await cache.getFrameAtOrBefore(time)
       } catch (err) {
         if (transportGeneration.current !== myGeneration) return // superseded while decoding
+        if (cacheSwapped()) {
+          rewindRaf.current = requestAnimationFrame(step)
+          return
+        }
         // Decode failed mid-scrub (corrupt sample, decoder hiccup) - fall
         // back to the reseek-based loop from wherever we got to rather than
         // freezing on a dead scrub.
@@ -494,6 +521,10 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip, 
         return
       }
       if (transportGeneration.current !== myGeneration) return // superseded while decoding
+      if (!frame && cacheSwapped()) {
+        rewindRaf.current = requestAnimationFrame(step)
+        return
+      }
 
       if (!frame) {
         // The cache resolved but had nothing to give. Anything that gets us
@@ -536,33 +567,40 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip, 
     const v = videoRef.current
     if (!v) return
     v.pause()
-    // HTML5 video can't play backwards, so REW is emulated by stepping
-    // currentTime back on a short interval — the same trick the original
-    // PlayerMonitor used for its reverse() transport. Skipping a tick
-    // while the video is still mid-seek (v.seeking) matters on a real,
-    // longer video: a single seek can take longer than this interval, and
-    // firing the next one before the last one resolves piles up seek
-    // requests faster than the browser can process them - which reads as
-    // the player freezing.
-    rewindTimer.current = setInterval(() => {
-      if (v.seeking) return
-      v.currentTime = Math.max(0, v.currentTime - 0.08)
-      if (v.currentTime <= 0) clearInterval(rewindTimer.current)
-    }, 20)
+    // HTML5 video can't play backwards, so REW is emulated by reseeking.
+    // Each seek goes to where REW *should* be by now (REWIND_RATE times
+    // the wall-clock time since it started), and the next one is issued
+    // the moment the last lands. It used to step a fixed 0.08s back every
+    // 20ms and skip ticks while a seek was pending. On camera footage a
+    // backward seek re-decodes from the previous keyframe and can take
+    // hundreds of ms, so nearly every tick was skipped and each one that
+    // wasn't only moved 0.08s - REW barely moved at all. Now slow seeks
+    // just mean bigger jumps between the frames shown, while the position
+    // still moves back at REWIND_RATE.
+    const myGeneration = transportGeneration.current
+    const startTime = v.currentTime
+    const startedAt = performance.now()
+
+    function seekToNow() {
+      if (transportGeneration.current !== myGeneration) return // another transport took over
+      const target = Math.max(0, startTime - ((performance.now() - startedAt) / 1000) * REWIND_RATE)
+      v.currentTime = target
+      if (target > 0) v.addEventListener('seeked', seekToNow, { once: true })
+    }
+
+    seekToNow()
   }
 
   function rewind() {
     transportGeneration.current++
-    clearInterval(rewindTimer.current)
     stopCanvasRewind()
     stopForwardCanvas()
     const v = videoRef.current
     if (!v) return
     v.pause()
 
-    const cache = frameCacheRef.current
-    if (cache) {
-      startCanvasRewind(cache, v.currentTime)
+    if (frameCacheRef.current) {
+      startCanvasRewind(v.currentTime)
     } else {
       startReseekRewind()
     }
