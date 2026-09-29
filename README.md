@@ -44,6 +44,16 @@ npm run dev
 - The audio track also works by itself: with no video clips, preview runs
   on the audio track's own clock (`src/hooks/useAudioSequencePlayer.js`)
   and export produces an M4A file instead of an MP4.
+- Heavy video work runs on the browser's own media stack via
+  [WebCodecs](https://developer.mozilla.org/docs/Web/API/WebCodecs_API)
+  where it can (`src/lib/webcodecsTranscode.js`): hardware decode/encode
+  on the GPU when the platform offers it, native software codecs
+  otherwise. That covers the Classic deck's all-intra scrub proxy (H.264,
+  or VP9 when the browser has no H.264 encoder) and export's video track
+  (H.264 only). Audio, mixing and the final mux stay on ffmpeg.wasm, which
+  is also the full fallback whenever WebCodecs can't handle a source - no
+  H.264 encoder, or a container other than MP4/MOV. The UI says which
+  engine did the work.
 - Export writes each clip into ffmpeg.wasm's in-memory virtual
   filesystem, trims and concatenates them there, and hands back a
   downloadable blob — nothing is persisted to disk until you click

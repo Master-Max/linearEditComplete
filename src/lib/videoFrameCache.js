@@ -455,7 +455,12 @@ export class VideoFrameCache {
     // different GOP isn't stuck behind a rejected one.
     this.decodeQueue = job.catch(() => {})
     this.pendingGops.set(gopStartIndex, job)
-    job.finally(() => this.pendingGops.delete(gopStartIndex))
+    // Not job.finally(): that returns a second promise which rejects along
+    // with the job, and with nothing awaiting it every failed decode (e.g.
+    // one cut short by close() when the scrub proxy's cache replaces this
+    // one) surfaced as an unhandled rejection.
+    const forget = () => this.pendingGops.delete(gopStartIndex)
+    job.then(forget, forget)
     return job
   }
 
@@ -502,7 +507,8 @@ export class VideoFrameCache {
       // with long GOPs stops after whatever fits.
       if (this.frames.size * this.approximateFrameBytes >= PREFETCH_BYTE_BUDGET) return
       this._ensureGopDecoded(gopStart).catch((err) => {
-        console.warn('VideoFrameCache: background prefetch failed', err)
+        // close() aborting an in-flight prefetch is expected, not a failure.
+        if (!this.closed) console.warn('VideoFrameCache: background prefetch failed', err)
       })
     }
   }

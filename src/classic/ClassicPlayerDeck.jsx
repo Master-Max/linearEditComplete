@@ -79,6 +79,13 @@ function paintCurrentVideoFrame(video, canvas, ctx) {
 // video") - whole seconds once the wait is long enough that a decimal is
 // just noise, one decimal place below that so a short clip doesn't round to
 // a misleading "0s".
+// How the scrub proxy got made - see transcodeToIntraProxy in useFFmpeg.js.
+const ENGINE_LABELS = {
+  gpu: 'on the GPU',
+  webcodecs: 'with WebCodecs (software)',
+  ffmpeg: 'with ffmpeg.wasm (CPU)',
+}
+
 function formatScrubPrepSeconds(seconds) {
   return seconds >= 10 ? `${Math.round(seconds)}` : seconds.toFixed(1)
 }
@@ -239,18 +246,26 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip, 
       if (cancelled) return
 
       let proxyFile = null
+      // transcodeToIntraProxy tries WebCodecs before ffmpeg.wasm, so a
+      // failed ffmpeg load doesn't rule the proxy out - it just throws
+      // below if neither can do it.
       const ffmpegApi = ffmpegRef.current
-      if (ffmpegApi && !ffmpegApi.error) {
+      if (ffmpegApi) {
         setIsPreparingScrub(true)
         const startedAt = performance.now()
         try {
-          proxyFile = await ffmpegApi.transcodeToIntraProxy(source.file, {
+          const proxy = await ffmpegApi.transcodeToIntraProxy(source.file, {
             onProgress: (p) => {
               if (!cancelled) setScrubPrepProgress(p)
             },
           })
+          proxyFile = proxy.blob
           if (!cancelled) {
-            setScrubPrepStats({ seconds: (performance.now() - startedAt) / 1000, sourceDuration: source.duration })
+            setScrubPrepStats({
+              seconds: (performance.now() - startedAt) / 1000,
+              sourceDuration: source.duration,
+              engine: proxy.engine,
+            })
           }
         } catch (err) {
           console.warn('Intra-frame scrub proxy failed, REW/jog will use the source GOPs', err)
@@ -790,7 +805,7 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip, 
       )}
       {!isPreparingScrub && scrubPrepStats && (
         <p className="scrub-status">
-          File transcoded — {formatScrubPrepSeconds(scrubPrepStats.seconds)}s for{' '}
+          File transcoded {ENGINE_LABELS[scrubPrepStats.engine]} — {formatScrubPrepSeconds(scrubPrepStats.seconds)}s for{' '}
           {formatMinutes(scrubPrepStats.sourceDuration)} minute video
         </p>
       )}
