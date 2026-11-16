@@ -998,7 +998,7 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip, 
             {source && source.kind !== 'audio' && isFrameCacheSupported() && (
               <b
                 onClick={() => setSmoothRew((on) => !on)}
-                className={`switch grey-button smooth-rew${smoothRew ? ' on' : ''}`}
+                className={`switch grey-button smooth-rew${smoothRew ? ' engaged' : ''}`}
                 role="switch"
                 aria-checked={smoothRew}
                 title="Prepares this source so REW shows every frame. Takes a while and slows the deck down until it's done."
