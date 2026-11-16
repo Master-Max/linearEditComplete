@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { usePlayerMarks } from '../hooks/usePlayerMarks'
 import { formatTimecode } from './formatTimecode'
 import { VideoFrameCache, isFrameCacheSupported } from '../lib/videoFrameCache'
+import { DEFAULT_FRAME_DURATION, refineFrameDuration } from '../lib/frameDuration'
 
 // Nominal REW rate, matching FF's native 4x playbackRate.
 const REWIND_RATE = 4
@@ -136,8 +137,24 @@ const ACTION_KEY_LABELS = {
 export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip, onAddAudioClip, ffmpeg }) {
   const videoRef = useRef(null)
   const canvasRef = useRef(null)
-  const marks = usePlayerMarks(videoRef, source)
   const rewindRaf = useRef(null)
+  // Smooth REW: off by default. The deck then runs entirely on <video>
+  // (see "HTML5 first" in README.md) - nothing is demuxed, decoded or
+  // transcoded when a source loads, which is what made loading and FF slow
+  // while the scrub proxy built. Switching it on builds the WebCodecs frame
+  // cache and proxy for this source (the effect below); it resets with
+  // every new source, since the cost is per file.
+  const [smoothRew, setSmoothRew] = useState(false)
+  // Generation of the reseek REW currently running (see startReseekRewind),
+  // and the time of the frame it last got on screen. While it runs,
+  // video.currentTime is the seek still in flight, not the picture.
+  const reseekGeneration = useRef(-1)
+  const reseekShownTime = useRef(0)
+  // One frame of this source, learned from playback (see frameDuration.js).
+  // Null until something has played.
+  const frameDurationRef = useRef(null)
+  const frameWatch = useRef(null)
+  const marks = usePlayerMarks(videoRef, source, liveTime)
   const forwardRvfc = useRef(null)
   // True while the canvas is being kept up only to cover <video>'s catch-up
   // seek after a canvas REW (see stopCanvasRewind). Whatever draws on the
@@ -170,6 +187,35 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip, 
   // Wall-clock time of the last marks.setCurrentTime call made from a canvas
   // render loop - see CLOCK_UPDATE_INTERVAL_MS/updateClock below.
   const lastClockUpdateRef = useRef(0)
+
+  // The time of the picture on screen right now, for MARK IN/OUT. The
+  // clock state trails it - <video>'s timeupdate only fires a few times a
+  // second, which measured 6-7 frames stale in PLAY and over 20 in FF - so
+  // marks read the element itself, except while something other than
+  // <video>'s own position is what's showing.
+  function liveTime() {
+    const v = videoRef.current
+    if (!v) return null
+    // Canvas REW, or its last frame held while <video> seeks to match.
+    if (rewindRaf.current != null || canvasHeldForSeek.current) return lastDrawnTimeRef.current
+    if (reseekGeneration.current === transportGeneration.current) return reseekShownTime.current
+    return v.currentTime
+  }
+
+  // Watches the frames <video> presents during forward playback to learn
+  // the source's frame duration for jog. No drawing - one subtraction per
+  // presented frame.
+  function watchFrameDuration() {
+    const v = videoRef.current
+    if (!v?.requestVideoFrameCallback || frameWatch.current != null) return
+    let last = null
+    const onFrame = (now, metadata) => {
+      if (last != null) frameDurationRef.current = refineFrameDuration(frameDurationRef.current, metadata.mediaTime - last)
+      last = metadata.mediaTime
+      frameWatch.current = videoRef.current === v && !v.paused && !v.ended ? v.requestVideoFrameCallback(onFrame) : null
+    }
+    frameWatch.current = v.requestVideoFrameCallback(onFrame)
+  }
 
   // Pushes `time` into the clock/marks state, throttled to
   // CLOCK_UPDATE_INTERVAL_MS unless `force` is set (used for the last frame
@@ -223,6 +269,7 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip, 
     transportGeneration.current++
     cancelAnimationFrame(rewindRaf.current)
     rewindRaf.current = null
+    frameWatch.current = null
     if (forwardRvfc.current != null) {
       videoRef.current?.cancelVideoFrameCallback?.(forwardRvfc.current)
       forwardRvfc.current = null
@@ -231,6 +278,10 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip, 
     canvasHeldForSeek.current = false
 
     let cancelled = false
+    // Stops the proxy transcode itself when the source changes or Smooth
+    // REW is switched off, rather than letting it run on to a result
+    // nobody will use.
+    const abort = new AbortController()
     frameCacheRef.current?.close()
     frameCacheRef.current = null
     setIsPreparingScrub(false)
@@ -259,7 +310,7 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip, 
       // Audio files have no frames to cache (or proxy) - every transport
       // just drives the media element directly, same as the no-cache
       // fallback for any video.
-      if (!source?.file || source.kind === 'audio' || !isFrameCacheSupported()) return
+      if (!smoothRew || !source?.file || source.kind === 'audio' || !isFrameCacheSupported()) return
 
       await install(new VideoFrameCache(source.file), 'original file')
       if (cancelled) return
@@ -274,6 +325,7 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip, 
         const startedAt = performance.now()
         try {
           const proxy = await ffmpegApi.transcodeToIntraProxy(source.file, {
+            signal: abort.signal,
             onProgress: (p) => {
               if (!cancelled) setScrubPrepProgress(p)
             },
@@ -288,7 +340,7 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip, 
             })
           }
         } catch (err) {
-          console.warn('Intra-frame scrub proxy failed, REW/jog will use the source GOPs', err)
+          if (!cancelled) console.warn('Intra-frame scrub proxy failed, REW/jog will use the source GOPs', err)
         } finally {
           if (!cancelled) setIsPreparingScrub(false)
         }
@@ -304,10 +356,18 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip, 
 
     return () => {
       cancelled = true
+      abort.abort()
       frameCacheRef.current?.close()
       frameCacheRef.current = null
     }
-  }, [source?.id, source?.file, source?.kind])
+  }, [source?.id, source?.file, source?.kind, smoothRew])
+
+  // A new source starts on plain <video> again, and knows nothing yet
+  // about its frame rate.
+  useEffect(() => {
+    setSmoothRew(false)
+    frameDurationRef.current = null
+  }, [source?.id])
 
   // markIn/markOut close over inPoint/outPoint state, so the keydown
   // listener below (mounted once) reads them through a ref that's kept
@@ -494,6 +554,7 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip, 
       // transports. Without a cache, REW falls back to reseeking <video>
       // directly and <video> stays the visible element throughout.
       if (frameCacheRef.current) startForwardCanvas()
+      else watchFrameDuration()
       // play() returns a promise that rejects with AbortError if the play
       // request gets interrupted (e.g. a pause()/another play() call lands
       // before it resolves - REW does exactly that). Expected and harmless,
@@ -657,12 +718,36 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip, 
     const myGeneration = transportGeneration.current
     const startTime = v.currentTime
     const startedAt = performance.now()
+    // For liveTime(): until the first seek lands, the picture is still the
+    // frame REW started on.
+    reseekGeneration.current = myGeneration
+    reseekShownTime.current = startTime
+    let pending = null
+
+    // Where the browser can report presented frames, take the on-screen
+    // time from those: 'seeked' and the frame reaching the screen aren't
+    // the same moment, and a mark between the two would read one REW step
+    // (hundreds of ms) off.
+    const presented = typeof v.requestVideoFrameCallback === 'function'
+    if (presented) {
+      const onFrame = (now, metadata) => {
+        if (transportGeneration.current !== myGeneration) return
+        reseekShownTime.current = metadata.mediaTime
+        v.requestVideoFrameCallback(onFrame)
+      }
+      v.requestVideoFrameCallback(onFrame)
+    }
 
     function seekToNow() {
       if (transportGeneration.current !== myGeneration) return // another transport took over
+      if (pending != null && !presented) reseekShownTime.current = pending // that seek landed: it's on screen now
       const target = Math.max(0, startTime - ((performance.now() - startedAt) / 1000) * REWIND_RATE)
+      pending = target
       v.currentTime = target
-      if (target > 0) v.addEventListener('seeked', seekToNow, { once: true })
+      v.addEventListener('seeked', target > 0 ? seekToNow : () => {
+        // Reached the start: <video> is simply parked there now.
+        if (reseekGeneration.current === myGeneration) reseekGeneration.current = -1
+      }, { once: true })
     }
 
     seekToNow()
@@ -697,10 +782,12 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip, 
 
     const cache = frameCacheRef.current
     if (!cache) {
-      // No sample table to consult, so fall back to nudging the clock by an
-      // assumed frame duration. Inexact on anything that isn't ~30fps, but
-      // <video> has nothing better to offer here.
-      const target = Math.max(0, Math.min(v.duration || Infinity, v.currentTime + direction / 30))
+      // No sample table to consult (the HTML5 path), so step by the frame
+      // duration playback has shown this source to have, or 1/30s if
+      // nothing has played yet. While a seek is in flight currentTime is
+      // already its target, so quick repeated presses add up.
+      const frame = frameDurationRef.current ?? DEFAULT_FRAME_DURATION
+      const target = Math.max(0, Math.min(v.duration || Infinity, v.currentTime + direction * frame))
       v.currentTime = target
       return
     }
@@ -860,7 +947,7 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip, 
       <div className="clock">{formatTimecode(marks.currentTime)}</div>
       {isPreparingScrub && (
         <>
-          <p className="scrub-status">Preparing fast scrub…</p>
+          <p className="scrub-status">Preparing smooth REW…</p>
           <div className="scrub-progress-track">
             <div className="scrub-progress-fill" style={{ width: `${Math.round(scrubPrepProgress * 100)}%` }} />
           </div>
@@ -908,6 +995,17 @@ export default function ClassicPlayerDeck({ source, onLoad, onEject, onAddClip, 
           <div className="row">
             <b onClick={onLoad} className="switch blue-button">LOAD</b>
             <b onClick={onEject} className="switch blue-button">EJECT</b>
+            {source && source.kind !== 'audio' && isFrameCacheSupported() && (
+              <b
+                onClick={() => setSmoothRew((on) => !on)}
+                className={`switch grey-button smooth-rew${smoothRew ? ' on' : ''}`}
+                role="switch"
+                aria-checked={smoothRew}
+                title="Prepares this source so REW shows every frame. Takes a while and slows the deck down until it's done."
+              >
+                SMOOTH REW
+              </b>
+            )}
           </div>
         </div>
       </div>

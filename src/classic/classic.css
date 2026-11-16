@@ -466,3 +466,12 @@
   color: #a05a00;
   overflow-wrap: anywhere;
 }
+
+/* SMOOTH REW toggle (ClassicPlayerDeck): lit while switched on. */
+.classic-editor .smooth-rew.on {
+  background-color: #f0c040;
+  border-right-color: #a67c12;
+  border-bottom-color: #a67c12;
+  border-left-color: #c2941c;
+  border-top-color: #d9a826;
+}

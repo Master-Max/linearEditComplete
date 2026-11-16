@@ -44,6 +44,16 @@ npm run dev
 - The audio track also works by itself: with no video clips, preview runs
   on the audio track's own clock (`src/hooks/useAudioSequencePlayer.js`)
   and export produces an M4A file instead of an MP4.
+- **HTML5 first.** The Classic player deck runs on a plain `<video>`
+  element by default, the way the original LinearEdit did: nothing is
+  demuxed or transcoded when a source loads. FF is `playbackRate`, REW
+  reseeks to where 4x rewind should be by now (each seek issued as the last
+  one lands), jog steps by the frame duration seen during playback, and
+  MARK IN/OUT read the element's position at the press. REW shows only a
+  few frames a second this way; the SMOOTH REW switch under the monitor
+  builds the WebCodecs frame cache and all-intra proxy for the loaded
+  source (see `ROADMAP.md`), which shows every frame once it's ready but
+  costs CPU while it builds.
 - Heavy video work runs on the browser's own media stack via
   [WebCodecs](https://developer.mozilla.org/docs/Web/API/WebCodecs_API)
   where it can (`src/lib/webcodecsTranscode.js`): hardware decode/encode

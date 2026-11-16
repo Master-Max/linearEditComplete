@@ -188,6 +188,22 @@ playback moved onto this cache and its canvas rendering:
 None of this touches the whole-GOP-decode-before-first-frame cost above,
 which is still open.
 
+## Scrub proxy is opt-in (SMOOTH REW), no longer built on load
+
+**Where:** `src/classic/ClassicPlayerDeck.jsx` (`smoothRew`)
+
+Building the frame cache and proxy on every load made the deck slow for the
+first minute or more of every source: measured on 4 cores with no GPU, a
+3.5-minute 1080p file took 86s to prepare, and until it finished FF showed
+30 frames a second instead of 59 and REW froze for 1-3s at a time. Plain
+`<video>` loads in 0.2s. So the deck is HTML5-only until SMOOTH REW is
+switched on for a source; everything below about the proxy and the frame
+cache describes what that switch turns on.
+
+**Still open:** HTML5 REW shows 5-8 frames a second. Cheaper ways to get
+smooth REW (decode the source's own GOPs when keyframes are close, a
+smaller half-rate proxy, keeping the proxy between sessions) are untested.
+
 ## Transcode footage to an intra-frame proxy on load
 
 **Where:** `src/hooks/useFFmpeg.js` (`transcodeToIntraProxy`),
