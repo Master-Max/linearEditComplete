@@ -205,15 +205,6 @@
   }
 }
 
-@keyframes classic-glow {
-  0%, 21%, 100% {
-    box-shadow: 0 0 4px 1px #ffe57f;
-  }
-  12%, 76% {
-    box-shadow: 0 0 4px 2px #ffe57f;
-  }
-}
-
 .classic-editor .on {
   background-color: #ffffff;
   animation: classic-blink 1.5s linear infinite;
@@ -221,7 +212,12 @@
 
 .classic-editor .lock {
   background-color: #ffcc00;
-  animation: classic-glow 1s linear infinite;
+  /* A steady glow, not the classic-glow pulse this used to run. Any running
+     CSS animation keeps the page repainting for as long as an IN or OUT
+     mark is set, and without a GPU that competes with <video>: FF at 4x
+     measured 34 frames a second with a mark set against 55 without.
+     steps() timing didn't help - only having no animation did. */
+  box-shadow: 0 0 4px 2px #ffe57f;
 }
 
 .classic-editor .center-div {
@@ -465,4 +461,14 @@
   font-size: 10px;
   color: #a05a00;
   overflow-wrap: anywhere;
+}
+
+/* SMOOTH REW toggle (ClassicPlayerDeck): lit while switched on. Not named
+   `on` - that class is the blinking light above. */
+.classic-editor .smooth-rew.engaged {
+  background-color: #f0c040;
+  border-right-color: #a67c12;
+  border-bottom-color: #a67c12;
+  border-left-color: #c2941c;
+  border-top-color: #d9a826;
 }

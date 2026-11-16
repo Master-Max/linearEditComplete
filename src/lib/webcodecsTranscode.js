@@ -154,6 +154,17 @@ async function readContainer(file) {
   }
 }
 
+// Callers can stop a transcode they no longer want (options.signal). Not
+// retryable: a software retry of work nobody wants is the opposite of the
+// point.
+function throwIfAborted(signal) {
+  if (!signal?.aborted) return
+  const err = new Error('transcode cancelled')
+  err.name = 'AbortError'
+  err.retryable = false
+  throw err
+}
+
 function describe(err) {
   return err?.message || err?.name || String(err)
 }
@@ -229,7 +240,7 @@ function createEncoderPipeline({ config, muxCodec }) {
 // Decodes samples[start, end) (decode order) of one demuxed track, calling
 // onFrame for every output frame in presentation order. onFrame owns the
 // frame and must close it. Throttles on both codecs' queues.
-async function decodeRange({ decoderConfig, samples, start, end, onFrame, pipeline }) {
+async function decodeRange({ decoderConfig, samples, start, end, onFrame, pipeline, signal }) {
   let error = null
   const decoder = new VideoDecoder({
     output: (frame) => {
@@ -252,6 +263,7 @@ async function decodeRange({ decoderConfig, samples, start, end, onFrame, pipeli
   try {
     for (let i = start; i < end; i++) {
       if (error) throw error
+      throwIfAborted(signal)
       pipeline.throwIfFailed()
       const wait = waitForQueues(decoder, pipeline.encoder)
       if (wait) await wait
@@ -297,7 +309,8 @@ export function buildIntraProxy(file, options = {}) {
   return withSoftwareRetry((accelerations) => buildIntraProxyOnce(file, { ...options, accelerations }), options.onProgress)
 }
 
-async function buildIntraProxyOnce(file, { maxWidth, onProgress, families = ['avc', 'vp9'], accelerations }) {
+async function buildIntraProxyOnce(file, { maxWidth, onProgress, families = ['avc', 'vp9'], accelerations, signal }) {
+  throwIfAborted(signal)
   const { track, decodeOrderSamples: samples } = await readContainer(file)
   if (samples.length === 0) throw new Error('no video samples')
   const decoder = await pickDecoderConfig(track, accelerations)
@@ -321,6 +334,7 @@ async function buildIntraProxyOnce(file, { maxWidth, onProgress, families = ['av
       start: 0,
       end: samples.length,
       pipeline,
+      signal,
       onFrame: (frame) => {
         ctx.drawImage(frame, 0, 0, width, height)
         const out = new VideoFrame(canvas, { timestamp: frame.timestamp, duration: frame.duration ?? undefined })

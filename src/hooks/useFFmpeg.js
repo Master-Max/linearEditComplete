@@ -423,13 +423,16 @@ export function useFFmpeg() {
   // and encode), 'webcodecs' (the browser's native software codecs) or
   // 'ffmpeg'; fallbackReason says why it's 'ffmpeg', for the UI.
   const transcodeToIntraProxy = useCallback(
-    async (file, { onProgress } = {}) => {
+    async (file, { onProgress, signal } = {}) => {
       let fallbackReason = 'this browser has no WebCodecs video encoder'
       if (isWebCodecsTranscodeSupported()) {
         try {
-          const result = await buildIntraProxy(file, { maxWidth: PROXY_MAX_WIDTH, onProgress })
+          const result = await buildIntraProxy(file, { maxWidth: PROXY_MAX_WIDTH, onProgress, signal })
           return { blob: result.blob, engine: result.hardware ? 'gpu' : 'webcodecs' }
         } catch (err) {
+          // Cancelled by the caller (`signal`) - don't start the far
+          // slower ffmpeg.wasm version of work nobody wants any more.
+          if (signal?.aborted) throw err
           console.warn('WebCodecs scrub proxy failed, falling back to ffmpeg.wasm', err)
           fallbackReason = err?.message || String(err)
           onProgress?.(0)
